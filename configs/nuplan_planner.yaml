@@ -1,0 +1,20 @@
+# Hydra planner group. Configure paths and a unique trace_dir before explicit simulation.
+score_function_planner:
+  _target_: score_function.planner.planner.ScoreFunctionPlanner
+  _convert_: all
+  score_config: /mnt/pai-hdd/wangyikai/Score_Function/configs/score_function.json
+  score_checkpoint: /mnt/pai-hdd/wangyikai/outputs/score_function/score/best.pt
+  root: /mnt/pai-hdd/wangyikai
+  device: cuda
+  gamma: 0.1
+  steps: 5
+  heading_projection: true
+  trace_dir: /mnt/pai-hdd/wangyikai/outputs/score_function/nuplan_trace_run1
+  past_trajectory_sampling:
+    _target_: nuplan.planning.simulation.trajectory.trajectory_sampling.TrajectorySampling
+    num_poses: 20
+    time_horizon: 2.0
+  future_trajectory_sampling:
+    _target_: nuplan.planning.simulation.trajectory.trajectory_sampling.TrajectorySampling
+    num_poses: 80
+    time_horizon: 8.0

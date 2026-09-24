@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "paths": {
+    "root": ".",
+    "planner_dir": "Diffusion-Planner",
+    "devkit_dir": "nuplan-devkit",
+    "planner_args": "Diffusion-Planner/checkpoints/args.json",
+    "planner_checkpoint": "Diffusion-Planner/checkpoints/model.pth",
+    "database_dir": "dataset/nuplan/nuplan-v1.1/trainval",
+    "maps_dir": "dataset/nuplan/maps",
+    "data_output": "score_data/score_function",
+    "manifest": "score_data/score_function/features_manifest.json",
+    "cache": "score_data/score_function/cache/index.json",
+    "run_dir": "outputs/score_function",
+    "train_log_allowlist": "Diffusion-Planner/nuplan_train.json"
+  },
+  "model": {
+    "architecture": "temporal_score_function",
+    "future_len": 80,
+    "input_dim": 4,
+    "hidden_dim": 192,
+    "context_dim": 192,
+    "num_heads": 6,
+    "dropout": 0.1,
+    "pre_dilations": [
+      1,
+      2
+    ],
+    "post_dilations": [
+      2,
+      4
+    ]
+  },
+  "training": {
+    "seed": 20260924,
+    "sigma": 0.05,
+    "max_epochs": 30,
+    "minimum_epochs": 5,
+    "batch_size": 2048,
+    "microbatch_size": 64,
+    "ema_decay": 0.999,
+    "ema_warmup": true,
+    "warmup_epochs": 1,
+    "warmup_learning_rate": 1e-05,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.0001,
+    "gradient_clip": 5.0,
+    "validate_every_epochs": 1,
+    "validation_seed": 20260924,
+    "validation_repeats": 8,
+    "checkpoint_every_updates": 250,
+    "log_every_updates": 25,
+    "num_workers": 4,
+    "sampling": "uniform_frame_without_replacement",
+    "plateau": {
+      "factor": 0.5,
+      "lr_patience": 3,
+      "stop_patience": 8,
+      "relative_improvement": 0.005,
+      "minimum_learning_rate": 1e-06
+    }
+  },
+  "data": {
+    "split_seed": 20260920,
+    "validation_fraction": 0.05,
+    "test_fraction": 0.0,
+    "max_scenarios_per_db": null,
+    "timestamp_spacing_s": 5,
+    "expand_scenarios": true,
+    "remove_invalid_goals": true,
+    "map_version": "nuplan-maps-v1.0",
+    "shard_size": 512,
+    "preprocess_workers": 16,
+    "prepare_raw": true,
+    "encoding_batch_size": 64
+  },
+  "runtime": {
+    "device": "cuda:0",
+    "memory_fraction": 0.5,
+    "cpu_threads": 2
+  },
+  "reference_seed": 20260920,
+  "checkpoint_selection": "minimum validation DSM among initial and EMA branches",
+  "method": "score_function_v1",
+  "refinement": {
+    "gamma": 0.1,
+    "steps": 5,
+    "heading_projection": true
+  },
+  "evaluation": {
+    "noise_repeats": 8,
+    "seed": 20260924,
+    "gammas": [
+      0.1,
+      0.25,
+      0.5,
+      1.0
+    ],
+    "visualize_samples": 8,
+    "batch_size": 64
+  },
+  "smoke": {
+    "frames": 4,
+    "updates": 200,
+    "learning_rate": 0.0005
+  }
+}

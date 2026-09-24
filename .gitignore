@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ruff_cache/
+outputs/
+score_data/
+build/
+dist/
+*.pt
+*.pth
+*.log
