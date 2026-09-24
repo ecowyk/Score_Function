@@ -54,7 +54,7 @@ L = mean((sigma * branch(y,C,R) + epsilon)^2)
 
 sigma固定为该run的超参数，默认pilot=.05；没有t采样、VP换算或多尺度混合。部署checkpoint绑定sigma，改变它必须新训练。日志记录 `sigma * ego_std` 的x/y/cos/sin各通道扰动标准差；cos/sin标准差不能称为角度标准差。
 
-使用官方train allowlist中的DB，按recording分约95%训练/5%验证，默认5秒抽取；测试集不参与。预处理开始时冻结当前已解压DB列表，之后解压的新DB不会加入已有run。扩充数据时另设data_output/cache/run_dir并重新开始，不修改manifest后继续旧checkpoint。
+使用官方train allowlist中的DB，按recording分约95%训练/5%验证，不进行时间间隔抽样（timestamp_spacing_s=null），不设置每个DB的场景数量上限；测试集不参与。预处理开始时冻结当前已解压DB列表，之后解压的新DB不会加入已有run。扩充数据时另设data_output/cache/run_dir并重新开始，不修改manifest后继续旧checkpoint。
 
 这里的val是score训练的内部验证划分，不是官方Val14。冻结的原planner可能在预训练时见过这些train allowlist中的记录；正式闭环仍需要单独的官方验证/测试协议。
 
