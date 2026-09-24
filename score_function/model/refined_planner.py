@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from score_function.model.refinement import refine_ego
+from score_function.utils.neighbor import prediction_neighbors
 from score_function.utils.normalizer import denormalize_ego_future, normalize_ego_future
 
 
@@ -48,6 +49,11 @@ class ScoreRefinedPlanner(nn.Module):
             self.steps,
             self.heading_projection,
             record_trace,
+            **(
+                prediction_neighbors(prediction, inputs, self.normalizer)
+                if getattr(self.score_branch, "uses_neighbor_future", False)
+                else {}
+            ),
         )
         revised = prediction.clone()
         revised[:, 0] = denormalize_ego_future(result, self.normalizer)

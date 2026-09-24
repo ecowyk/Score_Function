@@ -17,6 +17,7 @@ from score_function.evaluation.common import (
 from score_function.evaluation.metrics import MetricAccumulator, finite_scalar, trajectory_metrics
 from score_function.evaluation.reporting import format_metric
 from score_function.evaluation.visualization import plot_trajectory
+from score_function.utils.neighbor import prediction_neighbors
 from score_function.utils.train_utils import (
     atomic_write,
     file_hash,
@@ -135,6 +136,13 @@ def evaluate_planner(config, checkpoint, split="val", output=None, max_samples=N
                     steps,
                     heading_projection=refinement["heading_projection"],
                     record_trace=True,
+                    **(
+                        prediction_neighbors(
+                            output["prediction"], inputs, planner_args.state_normalizer
+                        )
+                        if getattr(model, "uses_neighbor_future", False)
+                        else {}
+                    ),
                 )
                 refinement_seconds += sum(trace["step_seconds"])
                 # Preserve exact physical predictions when refinement is disabled.

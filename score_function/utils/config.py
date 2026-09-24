@@ -43,6 +43,16 @@ def load_config(path, root=None, overrides=()):
     for key in ("pre_dilations", "post_dilations"):
         if not model[key] or any(not isinstance(x, int) or x < 1 for x in model[key]):
             raise ValueError(f"Invalid model.{key}")
+    for key in ("temporal_attention", "neighbor_future"):
+        if not isinstance(model.get(key, False), bool):
+            raise ValueError(f"model.{key} must be boolean")
+    if model.get("neighbor_future") and (
+        not config["paths"].get("neighbor_cache")
+        or config["data"].get("neighbor_batch_size", 0) < 1
+    ):
+        raise ValueError(
+            "Neighbor branch requires paths.neighbor_cache and data.neighbor_batch_size"
+        )
     for key in (
         "sigma",
         "max_epochs",

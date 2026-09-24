@@ -2,6 +2,11 @@
 
 日期：2026-09-24。方法 `score_function_v1`，包 `score_function`，版本0.1.0。
 
+当前新增的八组训练入口是 `scripts/launch_experiments.sh`，完整协议、GPU 分配、
+环境安装和恢复方法见 [Eight-GPU Training Suite](experiment_suite.md)。
+该入口实现四个 σ、同参数量 RF77、全局时间 attention 和预测邻车条件的对照；
+以下内容保留为基础方法的设计说明。执行新入口会启动八组训练，不自动启动评测。
+
 ## 审阅结论
 
 用户给出的 Phase1 方案没有阻碍实现的根本矛盾，可以实施。该方案与此前冻结 DiT 后克隆输出 head 有实质区别：新分支的整个轨迹表示可以学习，并且不读取带 diffusion time 的 DiT latent。只共享不接收 diffusion time 的 scene encoder 和 route encoder。

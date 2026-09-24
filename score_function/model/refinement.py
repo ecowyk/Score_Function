@@ -35,6 +35,8 @@ def refine_ego(
     steps: int,
     heading_projection: bool = True,
     record_trace: bool = True,
+    neighbor_future: torch.Tensor | None = None,
+    neighbor_valid: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict]:
     """Apply exactly K updates x += gamma*sigma^2*s(x,C,R), without adding noise.
 
@@ -82,7 +84,12 @@ def refine_ego(
     for step in range(steps):
         _synchronize(current)
         step_started = time.perf_counter()
-        score = score_branch(current, scene, route)
+        kwargs = (
+            {"neighbor_future": neighbor_future, "neighbor_valid": neighbor_valid}
+            if neighbor_future is not None
+            else {}
+        )
+        score = score_branch(current, scene, route, **kwargs)
         if score.shape != current.shape or not torch.isfinite(score).all():
             raise ValueError(f"Invalid/nonfinite score at refinement step {step + 1}")
         updated = current + gamma * sigma**2 * score

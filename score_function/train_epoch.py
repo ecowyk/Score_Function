@@ -8,6 +8,7 @@ from score_function.loss import fixed_sigma_dsm_loss
 from score_function.utils import ddp
 from score_function.utils.dataset import build_data_loader, device_batch
 from score_function.utils.ema import update_ema
+from score_function.utils.neighbor import neighbor_kwargs
 from score_function.utils.train_utils import sample_noise
 
 
@@ -28,7 +29,7 @@ def validate_epoch(models, dataset, cfg, device):
             ).to(device)
             noisy = batch["target"] + cfg["sigma"] * noise
             for index, model in enumerate(models.values()):
-                score = model(noisy, batch["context"], batch["route"])
+                score = model(noisy, batch["context"], batch["route"], **neighbor_kwargs(batch))
                 error = (cfg["sigma"] * score + noise).square()
                 totals[index] += error.double().sum()
             totals[-1] += noise.numel()
@@ -83,7 +84,10 @@ def train_epoch(
             sync = wrapped.no_sync() if world > 1 and micro < accumulation - 1 else nullcontext()
             with sync:
                 score = wrapped(
-                    batch["target"] + cfg["sigma"] * noise, batch["context"], batch["route"]
+                    batch["target"] + cfg["sigma"] * noise,
+                    batch["context"],
+                    batch["route"],
+                    **neighbor_kwargs(batch),
                 )
                 loss = fixed_sigma_dsm_loss(score, noise, cfg["sigma"])
                 if not torch.isfinite(loss):

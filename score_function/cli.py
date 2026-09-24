@@ -18,6 +18,7 @@ def main(argv=None):
             "check-ddp",
             "prepare",
             "cache",
+            "cache-neighbors",
             "smoke",
             "train",
             "evaluate",
@@ -78,6 +79,10 @@ def main(argv=None):
         from score_function.tools.check_small_batch import run_smoke
 
         run_smoke(config)
+    elif args.command == "cache-neighbors":
+        from score_function.data_process.neighbor_cache import build_neighbor_cache
+
+        build_neighbor_cache(config)
     elif args.command == "train":
         from score_function.train import train
 

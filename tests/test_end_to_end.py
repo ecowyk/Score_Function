@@ -137,6 +137,29 @@ class EndToEndTests(unittest.TestCase):
                 self.assertTrue((folder / "per_sample.csv").is_file())
                 self.assertGreater((folder / "trajectory_000.png").stat().st_size, 1024)
 
+            # Exercise the optional branch against the actual official decoder,
+            # then run the same train/evaluate interfaces with the sidecar cache.
+            from score_function.data_process.neighbor_cache import build_neighbor_cache
+
+            config["model"]["neighbor_future"] = True
+            config["data"]["neighbor_batch_size"] = 2
+            config["paths"]["neighbor_cache"] = str(root / "neighbors/index.json")
+            config["output"] = str(root / "neighbor_run")
+            build_neighbor_cache(config)
+            neighbor_hash = file_hash(config["paths"]["neighbor_cache"])
+            build_neighbor_cache(config)
+            self.assertEqual(neighbor_hash, file_hash(config["paths"]["neighbor_cache"]))
+            self.assertEqual(index_hash, file_hash(cache_index))
+            train(config, device_override="cpu")
+            selected = Path(config["output"]) / "score/best.pt"
+            self.assertEqual(evaluate(config, selected, split="val")["numerical_failures"], 0)
+            self.assertEqual(
+                evaluate_planner(config, selected, split="val", max_samples=1)[
+                    "numerical_failures"
+                ],
+                0,
+            )
+
     def _assert_finite_numbers(self, value):
         if isinstance(value, dict):
             for child in value.values():

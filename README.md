@@ -80,6 +80,22 @@ python -m score_function check-config \
 
 ## Training
 
+For the eight-model sigma/temporal/neighbor ablation on eight A100 GPUs:
+
+```bash
+bash scripts/launch_experiments.sh \
+  --root /path/to/workspace \
+  --database-dir /path/to/nuplan/trainval \
+  --maps-dir /path/to/nuplan/maps
+tmux attach -t score_matrix_v1_wyk
+```
+
+This bootstraps the `score_function_wyk` environment and official dependencies,
+prepares shared caches, and runs one experiment per GPU in tmux. Full eligible
+training data is used without timestamp thinning. See the
+[experiment suite guide](docs/experiment_suite.md) for the matrix, existing-environment
+option, paths, logs, and resume commands.
+
 The training pipeline prepares nuPlan features, caches the frozen scene and route encodings, and trains the score branch. Checkpoint selection uses validation DSM with EMA and plateau-based learning-rate reduction and early stopping.
 
 Run on eight GPUs in tmux:

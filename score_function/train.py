@@ -25,6 +25,7 @@ from score_function.utils.train_utils import (
     atomic_write,
     capture_rank_rng,
     load_tensor,
+    resolve_path,
     restore_rank_rng,
     source_hashes,
     training_signature,
@@ -63,8 +64,24 @@ def _train(config, output, device, resume, stop_after_updates, model_factory):
     torch.backends.cudnn.allow_tf32 = False
     torch.manual_seed(cfg["seed"])
     training, validation = (
-        ShardedDataset(config["cache"], "train"),
-        ShardedDataset(config["cache"], "val"),
+        ShardedDataset(
+            config["cache"],
+            "train",
+            neighbor_index=(
+                resolve_path(config, "neighbor_cache")
+                if config["model"].get("neighbor_future")
+                else None
+            ),
+        ),
+        ShardedDataset(
+            config["cache"],
+            "val",
+            neighbor_index=(
+                resolve_path(config, "neighbor_cache")
+                if config["model"].get("neighbor_future")
+                else None
+            ),
+        ),
     )
     rank, world = ddp.rank(), ddp.world_size()
     batch_size, microbatch = cfg["batch_size"], cfg["microbatch_size"]

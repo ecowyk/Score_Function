@@ -8,6 +8,10 @@ import torch
 from torch import nn
 
 from score_function.model.module.attention import SceneCrossAttentionBlock
+from score_function.model.module.future_condition import (
+    NeighborFutureAttention,
+    TemporalSelfAttentionBlock,
+)
 from score_function.model.module.temporal import TemporalResidualBlock
 
 
@@ -24,6 +28,8 @@ class ScoreFunctionBranch(nn.Module):
         pre_dilations: Sequence[int] = (1, 2),
         post_dilations: Sequence[int] = (2, 4),
         context_dim: int = 192,
+        temporal_attention: bool = False,
+        neighbor_future: bool = False,
     ):
         super().__init__()
         if future_len < 1 or input_dim != 4:
@@ -46,6 +52,7 @@ class ScoreFunctionBranch(nn.Module):
         self.input_dim = input_dim
         self.context_dim = context_dim
         self.hidden_dim = hidden_dim
+        self.uses_neighbor_future = neighbor_future
         # Scene attention mixes each query with frozen scene tokens, not with
         # other trajectory queries.  Thus this is the candidate receptive field.
         self.temporal_receptive_field = 1 + 4 * sum((*pre_dilations, *post_dilations))
@@ -61,6 +68,18 @@ class ScoreFunctionBranch(nn.Module):
             TemporalResidualBlock(hidden_dim, dilation, dropout) for dilation in pre_dilations
         )
         self.scene_attention = SceneCrossAttentionBlock(hidden_dim, num_heads, dropout)
+        self.global_attention = (
+            TemporalSelfAttentionBlock(hidden_dim, num_heads, dropout)
+            if temporal_attention
+            else nn.Identity()
+        )
+        self.neighbor_attention = (
+            NeighborFutureAttention(future_len, hidden_dim, num_heads, dropout)
+            if neighbor_future
+            else None
+        )
+        if temporal_attention:
+            self.temporal_receptive_field = future_len
         self.post_blocks = nn.ModuleList(
             TemporalResidualBlock(hidden_dim, dilation, dropout) for dilation in post_dilations
         )
@@ -76,6 +95,8 @@ class ScoreFunctionBranch(nn.Module):
         ego_traj_norm: torch.Tensor,
         scene_context: torch.Tensor,
         route_embedding: torch.Tensor,
+        neighbor_future: torch.Tensor | None = None,
+        neighbor_valid: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if ego_traj_norm.ndim != 3 or ego_traj_norm.shape[1:] != (
             self.future_len,
@@ -102,6 +123,9 @@ class ScoreFunctionBranch(nn.Module):
         for block in self.pre_blocks:
             tokens = block(tokens)
         tokens = self.scene_attention(tokens, self.scene_projection(scene_context))
+        if self.neighbor_attention is not None:
+            tokens = self.neighbor_attention(tokens, neighbor_future, neighbor_valid)
+        tokens = self.global_attention(tokens)
         for block in self.post_blocks:
             tokens = block(tokens)
         return self.score_head(tokens)

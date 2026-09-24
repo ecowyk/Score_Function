@@ -1,0 +1,16 @@
+{
+  "name": "sigma_temporal_neighbors_v1",
+  "experiments": [
+    {"id": "S02-L", "sigma": 0.02, "variant": "local"},
+    {"id": "S05-L", "sigma": 0.05, "variant": "local"},
+    {"id": "S10-L", "sigma": 0.10, "variant": "local"},
+    {"id": "S20-L", "sigma": 0.20, "variant": "local"},
+    {"id": "S05-W", "sigma": 0.05, "variant": "wide"},
+    {"id": "S10-W", "sigma": 0.10, "variant": "wide"},
+    {"id": "S05-G", "sigma": 0.05, "variant": "global"},
+    {"id": "S05-N", "sigma": 0.05, "variant": "neighbors"}
+  ],
+  "training": {"batch_size": 2048, "microbatch_size": 128, "num_workers": 2},
+  "runtime": {"memory_fraction": 0.5, "cpu_threads": 2},
+  "data": {"preprocess_workers": 16, "encoding_batch_size": 64, "neighbor_batch_size": 16}
+}

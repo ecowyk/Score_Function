@@ -21,6 +21,7 @@ from score_function.evaluation.metrics import (
 )
 from score_function.evaluation.reporting import write_diagnostic_report
 from score_function.evaluation.visualization import plot_cosine, plot_trajectory
+from score_function.utils.neighbor import neighbor_kwargs
 from score_function.utils.train_utils import (
     atomic_write,
     file_hash,
@@ -92,7 +93,7 @@ def evaluate(config, checkpoint, split="val", output=None, max_samples=None):
                         (80, 4), batch["tokens"], seed, f"clean_validation_{repeat}"
                     ).to(device)
                     noisy = batch["target"] + sigma * noise
-                    score = model(noisy, batch["context"], batch["route"])
+                    score = model(noisy, batch["context"], batch["route"], **neighbor_kwargs(batch))
                     diagnostics = score_diagnostics(score, noise, sigma)
                     before = trajectory_metrics(noisy, batch["target"], normalizer)
                     diagnostics_cpu = {

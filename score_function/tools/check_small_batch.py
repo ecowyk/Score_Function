@@ -7,14 +7,23 @@ import torch
 from score_function.loss import fixed_sigma_dsm_loss
 from score_function.model.score_branch import build_model
 from score_function.utils.dataset import ShardedDataset, collate_cpu, device_batch
-from score_function.utils.train_utils import atomic_write, file_hash, source_hashes
+from score_function.utils.neighbor import neighbor_kwargs
+from score_function.utils.train_utils import atomic_write, file_hash, resolve_path, source_hashes
 
 
 def run_smoke(config, device_override=None):
     device = torch.device(device_override or config["runtime"]["device"])
     torch.set_num_threads(config["runtime"]["cpu_threads"])
     torch.manual_seed(config["training"]["seed"])
-    dataset = ShardedDataset(config["cache"], "train")
+    dataset = ShardedDataset(
+        config["cache"],
+        "train",
+        neighbor_index=(
+            resolve_path(config, "neighbor_cache")
+            if config["model"].get("neighbor_future")
+            else None
+        ),
+    )
     settings = config["smoke"]
     count = min(settings["frames"], len(dataset))
     batch = device_batch(collate_cpu([dataset[i] for i in range(count)]), device)
@@ -25,7 +34,7 @@ def run_smoke(config, device_override=None):
     optimizer = torch.optim.AdamW(model.parameters(), lr=settings["learning_rate"], weight_decay=0)
 
     def objective():
-        score = model(noisy, batch["context"], batch["route"])
+        score = model(noisy, batch["context"], batch["route"], **neighbor_kwargs(batch))
         return fixed_sigma_dsm_loss(score, noise, sigma)
 
     model.eval()

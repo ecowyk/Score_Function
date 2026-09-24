@@ -51,7 +51,14 @@ class ModelContracts(unittest.TestCase):
     def test_branch_shapes_no_timestep_and_configurable_width(self):
         self.assertEqual(
             list(inspect.signature(ScoreFunctionBranch.forward).parameters),
-            ["self", "ego_traj_norm", "scene_context", "route_embedding"],
+            [
+                "self",
+                "ego_traj_norm",
+                "scene_context",
+                "route_embedding",
+                "neighbor_future",
+                "neighbor_valid",
+            ],
         )
         model = ScoreFunctionBranch(hidden_dim=24, num_heads=6)
         self.assertEqual(torch.count_nonzero(model.temporal_pos).item(), 0)

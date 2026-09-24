@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, Sampler, Subset
 
-from score_function.utils.train_utils import atomic_write, file_hash, read_json
+from score_function.utils.train_utils import atomic_write, file_hash, fingerprint, read_json
 
 FIELDS = ("target", "context", "route")
 SHAPES = {"target": (80, 4), "context": (107, 192), "route": (192,)}
@@ -52,7 +52,7 @@ def validate_shard(directory, identity=None, checksums=True):
 
 
 class ShardedDataset(Dataset):
-    def __init__(self, index_path, split=None, max_open_shards=16):
+    def __init__(self, index_path, split=None, max_open_shards=16, neighbor_index=None):
         self.index_path = Path(index_path)
         index = read_json(self.index_path)
         if index.get("schema_version") != 1 or index.get("method") != "score_function_v1":
@@ -62,6 +62,18 @@ class ShardedDataset(Dataset):
         self.metadata = index["metadata"]
         self.sha256 = file_hash(self.index_path)
         self.shards = index["shards"]
+        self.neighbor_root = None
+        if neighbor_index is not None:
+            neighbor_index = Path(neighbor_index)
+            neighbors = read_json(neighbor_index)
+            if neighbors.get("source_cache_sha256") != self.sha256 or len(
+                neighbors["shards"]
+            ) != len(self.shards):
+                raise ValueError("Neighbor cache does not match the shared scene cache")
+            self.neighbor_root = neighbor_index.parent.resolve()
+            self.neighbor_shards = neighbors["shards"]
+            self.sha256 = fingerprint([self.sha256, file_hash(neighbor_index)])
+            self.neighbor_identity = neighbors["identity"]
         self.records, self.locations = [], []
         seen, recordings = set(), {}
         root = self.index_path.parent.resolve()
@@ -73,6 +85,18 @@ class ShardedDataset(Dataset):
             if file_hash(directory / "complete.json") != item["marker_sha256"]:
                 raise ValueError("Shard marker changed since index publication")
             rows = read_json(directory / "records.json")
+            if self.neighbor_root is not None:
+                neighbor_item = self.neighbor_shards[number]
+                neighbor_dir = (self.neighbor_root / neighbor_item["path"]).resolve()
+                if not neighbor_dir.is_relative_to(self.neighbor_root):
+                    raise ValueError("Neighbor shard escapes cache directory")
+                marker_n = validate_shard(neighbor_dir, self.neighbor_identity, checksums=False)
+                if (
+                    file_hash(neighbor_dir / "complete.json") != neighbor_item["marker_sha256"]
+                    or marker_n["count"] != len(rows)
+                    or marker_n["source_marker_sha256"] != item["marker_sha256"]
+                ):
+                    raise ValueError("Neighbor shard alignment/provenance mismatch")
             if file_hash(directory / "records.json") != marker["hashes"]["records.json"]:
                 raise ValueError("Shard records changed since cache construction")
             if len(rows) != marker["count"]:
@@ -119,6 +143,14 @@ class ShardedDataset(Dataset):
                 key: np.load(directory / f"{key}.npy", mmap_mode="r", allow_pickle=False)
                 for key in FIELDS
             }
+            if self.neighbor_root is not None:
+                neighbor_dir = self.neighbor_root / self.neighbor_shards[shard]["path"]
+                self._maps[shard].update(
+                    {
+                        key: np.load(neighbor_dir / f"{key}.npy", mmap_mode="r", allow_pickle=False)
+                        for key in ("neighbor_future", "neighbor_valid")
+                    }
+                )
             if len(self._maps) > self.max_open_shards:
                 _, arrays = self._maps.popitem(last=False)
                 for array in arrays.values():
@@ -134,7 +166,7 @@ class ShardedDataset(Dataset):
 
 def collate_cpu(rows):
     return {
-        **{key: torch.stack([row[key] for row in rows]) for key in FIELDS},
+        **{key: torch.stack([row[key] for row in rows]) for key in rows[0] if key != "record"},
         "tokens": [row["record"]["token"] for row in rows],
     }
 

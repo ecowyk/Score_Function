@@ -4,7 +4,7 @@ from pathlib import Path
 
 import torch
 
-from score_function.utils.train_utils import atomic_write, source_hashes
+from score_function.utils.train_utils import atomic_write, resolve_path, source_hashes
 
 
 def create_output(config, output, name):
@@ -26,7 +26,15 @@ def load_evaluation(config, checkpoint, split, max_samples):
     )
     model, state = load_selected(config, checkpoint, device)
     model.eval()
-    dataset = ShardedDataset(config["cache"], split)
+    dataset = ShardedDataset(
+        config["cache"],
+        split,
+        neighbor_index=(
+            resolve_path(config, "neighbor_cache")
+            if config.get("model", {}).get("neighbor_future")
+            else None
+        ),
+    )
     if dataset.metadata["planner"] != state["planner"]:
         dataset.close()
         raise ValueError("Evaluation cache and checkpoint use different frozen planners")

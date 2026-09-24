@@ -37,7 +37,15 @@ def check_ddp(config):
         x = torch.randn(size, 80, 4, device=device)
         noise = torch.randn_like(x)
         sigma = config["training"]["sigma"]
-        score = wrapped(x + sigma * noise, *synthetic_conditions(size, device))
+        neighbor = (
+            {
+                "neighbor_future": torch.randn(size, 10, 80, 4, device=device),
+                "neighbor_valid": torch.ones(size, 10, dtype=torch.bool, device=device),
+            }
+            if config["model"].get("neighbor_future")
+            else {}
+        )
+        score = wrapped(x + sigma * noise, *synthetic_conditions(size, device), **neighbor)
         (sigma * score + noise).square().mean().backward()
         if any(p.grad is None or not torch.isfinite(p.grad).all() for p in model.parameters()):
             raise FloatingPointError("Missing/nonfinite score gradient")
