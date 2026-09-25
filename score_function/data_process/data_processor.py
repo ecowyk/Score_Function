@@ -52,7 +52,7 @@ def allowed_databases(config):
     allowed = read_json(resolve_path(config, "train_log_allowlist"))
     if not isinstance(allowed, list) or not all(isinstance(x, str) for x in allowed):
         raise ValueError("Expected the official nuplan_train.json list of log names")
-    allowed = {Path(x).stem for x in allowed}
+    allowed = {Path(x).name for x in allowed}
     files = sorted(resolve_path(config, "database_dir").rglob("*.db"))
     selected = [p for p in files if p.stem in allowed]
     if not selected or len({p.stem for p in selected}) != len(selected):
