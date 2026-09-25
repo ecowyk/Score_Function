@@ -59,7 +59,7 @@ L = mean((sigma * branch(y,C,R) + epsilon)^2)
 
 sigma固定为该run的超参数，默认pilot=.05；没有t采样、VP换算或多尺度混合。部署checkpoint绑定sigma，改变它必须新训练。日志记录 `sigma * ego_std` 的x/y/cos/sin各通道扰动标准差；cos/sin标准差不能称为角度标准差。
 
-使用官方train allowlist中的DB，按recording分约95%训练/5%验证，不进行时间间隔抽样（timestamp_spacing_s=null），不设置每个DB的场景数量上限；测试集不参与。预处理开始时冻结当前已解压DB列表，之后解压的新DB不会加入已有run。扩充数据时另设data_output/cache/run_dir并重新开始，不修改manifest后继续旧checkpoint。
+使用官方 train allowlist 中的 DB 作为候选来源，调用 nuPlan 官方 builder/filter 全局随机选择最多 1,000,000 个场景（包含内部训练/验证），展开场景、不做时间抽稀、不设每 DB 上限，remove_invalid_goals=false。按 recording 分约95%训练/5%验证；测试集不参与。先冻结选中 token 名单再并行提取特征，完整且有限的未来轨迹检查仍保留。预处理开始时冻结已解压 DB 列表，之后新增 DB 不加入已有 run。旧版无限量处理迁移到新目录，可用 --reuse-features-from 复用选中且校验通过的旧 NPZ；不沿用旧缓存或 checkpoint。
 
 这里的val是score训练的内部验证划分，不是官方Val14。冻结的原planner可能在预训练时见过这些train allowlist中的记录；正式闭环仍需要单独的官方验证/测试协议。
 

@@ -89,6 +89,23 @@ def load_config(path, root=None, overrides=()):
     for key in ("shard_size", "preprocess_workers", "encoding_batch_size"):
         if config["data"][key] < 1:
             raise ValueError(f"Invalid data.{key}")
+    data = config["data"]
+    if (
+        not isinstance(data.get("total_scenarios"), int)
+        or isinstance(data["total_scenarios"], bool)
+        or data["total_scenarios"] < 1
+    ):
+        raise ValueError("data.total_scenarios must be a positive integer global cap")
+    if (
+        data["max_scenarios_per_db"] is not None
+        or data["timestamp_spacing_s"] is not None
+        or not data["expand_scenarios"]
+    ):
+        raise ValueError(
+            "Global protocol requires expansion, no per-DB cap and no timestamp thinning"
+        )
+    if not isinstance(data.get("selection_seed"), int):
+        raise ValueError("data.selection_seed must be an integer")
     ref = config["refinement"]
     if (
         not math.isfinite(ref["gamma"])

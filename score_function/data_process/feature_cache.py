@@ -5,6 +5,7 @@ from pathlib import Path
 
 import torch
 
+from score_function.data_process.scenario_selection import log_name
 from score_function.utils import ddp
 from score_function.utils.config import METHOD
 from score_function.utils.dataset import ShardedDataset, validate_shard, write_shard
@@ -33,7 +34,7 @@ def build_cache(config):
     try:
         records = read_json(resolve_path(config, "manifest"))
         allowed = {
-            Path(name).stem for name in read_json(resolve_path(config, "train_log_allowlist"))
+            log_name(name) for name in read_json(resolve_path(config, "train_log_allowlist"))
         }
         if not records or any(row["log"] not in allowed for row in records):
             raise ValueError(

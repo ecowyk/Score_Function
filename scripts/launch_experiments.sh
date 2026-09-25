@@ -3,7 +3,7 @@
 set -euo pipefail
 CODE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 ORIGINAL_ARGS=("$@")
-ROOT="" RUN_NAME=score_matrix_v1 GPUS=0,1,2,3,4,5,6,7
+ROOT="" RUN_NAME=score_matrix_1m GPUS=0,1,2,3,4,5,6,7
 PYTHON="" ENV_NAME=score_function_wyk FOREGROUND=0 DRY_RUN=0
 while (( $# )); do
   case "$1" in
@@ -15,7 +15,7 @@ while (( $# )); do
     --foreground) FOREGROUND=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --resume) shift ;;
-    --database-dir|--maps-dir|--planner-dir|--devkit-dir|--checkpoint|--planner-args|--data-output|--base-config|--suite-config)
+    --database-dir|--maps-dir|--planner-dir|--devkit-dir|--checkpoint|--planner-args|--data-output|--base-config|--suite-config|--reuse-features-from|--total-scenarios)
       [[ $# -ge 2 ]] || { echo "Missing value for $1"; exit 2; }; shift 2 ;;
     -h|--help)
       echo 'Usage: bash scripts/launch_experiments.sh --root /workspace [options]'
@@ -23,7 +23,8 @@ while (( $# )); do
       echo '  --planner-dir PATH --devkit-dir PATH --checkpoint FILE --planner-args FILE'
       echo '  --python /existing/environment/bin/python (reuse a compatible environment)'
       echo '  --env-name score_function_wyk (otherwise create this conda environment)'
-      echo '  --gpus 0,1,2,3,4,5,6,7 --run-name score_matrix_v1'
+      echo '  --gpus 0,1,2,3,4,5,6,7 --run-name score_matrix_1m'
+      echo '  --total-scenarios 1000000 --reuse-features-from /old/data_output'
       echo '  --resume | --dry-run | --foreground'
       exit 0 ;;
     *) echo "Unknown option: $1"; exit 2 ;;

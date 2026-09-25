@@ -43,7 +43,12 @@ def parser():
     result.add_argument(
         "--data-output", help="Shared preprocessing/cache directory; preferably SSD"
     )
-    result.add_argument("--run-name", default="score_matrix_v1")
+    result.add_argument("--run-name", default="score_matrix_1m")
+    result.add_argument("--total-scenarios", type=int, help="Global selection cap; default 1000000")
+    result.add_argument(
+        "--reuse-features-from",
+        help="Old data_output directory; selected NPZs are reused read-only",
+    )
     result.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
     result.add_argument("--base-config", default=str(PROJECT / "configs/score_function.json"))
     result.add_argument("--suite-config", default=str(PROJECT / "configs/experiment_suite.json"))
@@ -103,11 +108,30 @@ def make_plan(args):
         cache=str(data / "cache/index.json"),
         neighbor_cache=str(data / "neighbors/index.json"),
     )
+    if args.reuse_features_from:
+        paths["reuse_features_from"] = str(Path(args.reuse_features_from).expanduser().resolve())
+        if Path(paths["reuse_features_from"]) == data:
+            raise ValueError(
+                "Use a new data-output; reuse-features-from must point to the old directory"
+            )
     for section in ("training", "runtime", "data"):
         base[section].update(registry[section])
     base["runtime"]["device"] = "cuda:0"
-    # Full eligible training data: no time thinning and no per-DB cap.
-    base["data"].update(timestamp_spacing_s=None, max_scenarios_per_db=None)
+    # Full raw source coverage, with the official GLOBAL scenario budget.
+    base["data"].update(
+        timestamp_spacing_s=None,
+        max_scenarios_per_db=None,
+        expand_scenarios=True,
+        remove_invalid_goals=False,
+    )
+    if args.total_scenarios is not None:
+        base["data"]["total_scenarios"] = args.total_scenarios
+    if (
+        not isinstance(base["data"]["total_scenarios"], int)
+        or isinstance(base["data"]["total_scenarios"], bool)
+        or base["data"]["total_scenarios"] < 1
+    ):
+        raise ValueError("total-scenarios must be a positive integer")
     entries, identifiers = [], set()
     for spec, gpu in zip(registry["experiments"], gpus):
         identifier, variant = spec["id"], spec["variant"]
@@ -192,7 +216,11 @@ class Suite:
         ):
             env.pop(name, None)
         env.update(
-            CUDA_VISIBLE_DEVICES=gpu, OMP_NUM_THREADS="2", MKL_NUM_THREADS="2", PYTHONUNBUFFERED="1"
+            CUDA_VISIBLE_DEVICES=gpu,
+            OMP_NUM_THREADS="2",
+            MKL_NUM_THREADS="2",
+            PYTHONUNBUFFERED="1",
+            TQDM_DISABLE="1",
         )
         log = Path(log)
         log.parent.mkdir(parents=True, exist_ok=True)

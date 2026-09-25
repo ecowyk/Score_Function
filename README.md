@@ -87,12 +87,13 @@ bash scripts/launch_experiments.sh \
   --root /path/to/workspace \
   --database-dir /path/to/nuplan/trainval \
   --maps-dir /path/to/nuplan/maps
-tmux attach -t score_matrix_v1_wyk
+tmux attach -t score_matrix_1m_wyk
 ```
 
 This bootstraps the `score_function_wyk` environment and official dependencies,
-prepares shared caches, and runs one experiment per GPU in tmux. Full eligible
-training data is used without timestamp thinning. See the
+prepares shared caches, and runs one experiment per GPU in tmux. The official
+training logs supply candidates for a global maximum of 1,000,000 scenarios,
+without timestamp thinning. See the
 [experiment suite guide](docs/experiment_suite.md) for the matrix, existing-environment
 option, paths, logs, and resume commands.
 
