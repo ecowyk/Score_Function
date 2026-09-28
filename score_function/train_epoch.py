@@ -9,11 +9,12 @@ from score_function.utils import ddp
 from score_function.utils.dataset import build_data_loader, device_batch
 from score_function.utils.ema import update_ema
 from score_function.utils.neighbor import neighbor_kwargs
+from score_function.utils.progress import Progress
 from score_function.utils.train_utils import sample_noise
 
 
 @torch.no_grad()
-def validate_epoch(models, dataset, cfg, device):
+def validate_epoch(models, dataset, cfg, device, *, description="Validation"):
     """No padding/duplicate validation frames; all ranks reduce sums and counts."""
     for model in models.values():
         model.eval()
@@ -21,18 +22,23 @@ def validate_epoch(models, dataset, cfg, device):
     batches = build_data_loader(
         dataset, cfg, indices=list(range(ddp.rank(), len(dataset), ddp.world_size()))
     )
-    for cpu_batch in batches:
-        batch = device_batch(cpu_batch, device)
-        for repeat in range(cfg["validation_repeats"]):
-            noise = sample_noise(
-                (80, 4), batch["tokens"], cfg["validation_seed"], f"clean_validation_{repeat}"
-            ).to(device)
-            noisy = batch["target"] + cfg["sigma"] * noise
-            for index, model in enumerate(models.values()):
-                score = model(noisy, batch["context"], batch["route"], **neighbor_kwargs(batch))
-                error = (cfg["sigma"] * score + noise).square()
-                totals[index] += error.double().sum()
-            totals[-1] += noise.numel()
+    total = len(batches) * cfg["validation_repeats"] * len(models)
+    with Progress(description, total=total, unit="forward") as display:
+        completed = 0
+        for cpu_batch in batches:
+            batch = device_batch(cpu_batch, device)
+            for repeat in range(cfg["validation_repeats"]):
+                noise = sample_noise(
+                    (80, 4), batch["tokens"], cfg["validation_seed"], f"clean_validation_{repeat}"
+                ).to(device)
+                noisy = batch["target"] + cfg["sigma"] * noise
+                for index, model in enumerate(models.values()):
+                    score = model(noisy, batch["context"], batch["route"], **neighbor_kwargs(batch))
+                    error = (cfg["sigma"] * score + noise).square()
+                    totals[index] += error.double().sum()
+                    completed += 1
+                    display(completed)
+                totals[-1] += noise.numel()
     ddp.sum_tensor(totals)
     if not torch.isfinite(totals).all() or totals[-1] <= 0:
         raise FloatingPointError("Invalid/empty validation")
