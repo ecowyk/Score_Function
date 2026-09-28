@@ -21,6 +21,7 @@ from score_function.utils.dataset import (
 )
 from score_function.utils.lr_schedule import ValidationPlateau
 from score_function.utils.planner_utils import planner_identity
+from score_function.utils.progress import Progress, console_log, report
 from score_function.utils.train_utils import (
     atomic_write,
     capture_rank_rng,
@@ -48,7 +49,9 @@ def train(config, resume=False, device_override=None, stop_after_updates=None, m
                 output.mkdir(parents=True, exist_ok=False)
             atomic_write(output / "status.json", {"state": "initializing", "resume": resume})
         ddp.barrier()
-        return _train(config, output, device, resume, stop_after_updates, model_factory)
+        with console_log(output / "console.log"):
+            report(f"Training {'resume' if resume else 'start'} | log: {output / 'console.log'}")
+            return _train(config, output, device, resume, stop_after_updates, model_factory)
     except Exception as exc:
         if output.exists():
             atomic_write(output / f"failure_rank{ddp.rank()}.json", {"error": repr(exc)})
@@ -65,26 +68,29 @@ def _train(config, output, device, resume, stop_after_updates, model_factory):
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     torch.manual_seed(cfg["seed"])
-    training, validation = (
-        ShardedDataset(
-            config["cache"],
-            "train",
-            neighbor_index=(
-                resolve_path(config, "neighbor_cache")
-                if config["model"].get("neighbor_future")
-                else None
-            ),
-        ),
-        ShardedDataset(
-            config["cache"],
-            "val",
-            neighbor_index=(
-                resolve_path(config, "neighbor_cache")
-                if config["model"].get("neighbor_future")
-                else None
-            ),
-        ),
-    )
+
+    def phase(name, state="initializing", **details):
+        if ddp.rank() == 0:
+            atomic_write(output / "status.json", {"state": state, "phase": name, **details})
+            report(f"[{name}] {details}")
+
+    datasets = []
+    for split in ("train", "val"):
+        phase(f"cache_index_{split}", cache=config["cache"])
+        with Progress(f"Cache index {split}", unit="shard") as display:
+            datasets.append(
+                ShardedDataset(
+                    config["cache"],
+                    split,
+                    progress=display,
+                    neighbor_index=(
+                        resolve_path(config, "neighbor_cache")
+                        if config["model"].get("neighbor_future")
+                        else None
+                    ),
+                )
+            )
+    training, validation = datasets
     rank, world = ddp.rank(), ddp.world_size()
     batch_size, microbatch = cfg["batch_size"], cfg["microbatch_size"]
     sampler_check = EpochBatchSampler(len(training), batch_size, microbatch, rank, world)
@@ -94,6 +100,7 @@ def _train(config, output, device, resume, stop_after_updates, model_factory):
     state = load_tensor(output / "last.pt") if resume else None
     if state and (state["signature"] != signature or state["sources"] != source_hashes()):
         raise ValueError("Resume configuration, data, world size or source code changed")
+    phase("verify_frozen_planner")
     identity = planner_identity(config)
     metadata = training.metadata
     if metadata["planner"] != identity:
@@ -107,6 +114,7 @@ def _train(config, output, device, resume, stop_after_updates, model_factory):
         raise ValueError("Invalid cached ego normalizer")
     if state and state["planner"] != identity:
         raise ValueError("Frozen Planner changed since checkpoint")
+    phase("build_model_and_optimizer")
     saved_config = copy.deepcopy(config)
     model = (model_factory or build_model)(config, device).to(device)
     if state:
@@ -151,12 +159,19 @@ def _train(config, output, device, resume, stop_after_updates, model_factory):
                         "best_val_dsm": best,
                     },
                 )
+                report(f"Training already complete at epoch={epoch}, step={step}.")
             return
     else:
         # Parameters are synchronized; dropout/noise streams differ by rank.
         torch.manual_seed(cfg["seed"] + rank + 1)
         random.seed(cfg["seed"] + rank + 1)
         np.random.seed(cfg["seed"] + rank + 1)
+    report(
+        f"Model={config['model']['parameterization']} | train={len(training)} val={len(validation)} "
+        f"| GPUs/processes={world} | global_batch={batch_size} microbatch/rank={microbatch} "
+        f"accumulation={accumulation} | updates/epoch={updates_per_epoch} "
+        f"| epoch budget={cfg['max_epochs']} | resume epoch={epoch} update={cursor}"
+    )
     if rank == 0:
         atomic_write(output / "config.json", saved_config)
         atomic_write(
@@ -192,6 +207,7 @@ def _train(config, output, device, resume, stop_after_updates, model_factory):
     start_time = time.monotonic()
 
     def save(finished=False, termination=None):
+        report(f"[checkpoint] Saving last.pt at epoch={epoch}, step={step}")
         ranks = ddp.gather_objects(
             {"rng": capture_rank_rng(device), "epoch_loss": epoch_loss, "epoch_count": epoch_count}
         )
@@ -254,20 +270,29 @@ def _train(config, output, device, resume, stop_after_updates, model_factory):
         atomic_write(output / "selection.json", selection)
 
     if not state:
-        initial = validate_epoch({"raw": model, "ema": averaged}, validation, cfg, device)
+        phase("initial_validation", epoch=0, step=0)
+        initial = validate_epoch(
+            {"raw": model, "ema": averaged},
+            validation,
+            cfg,
+            device,
+            description="Initial validation",
+        )
         best = initial["raw"]
         publish_best("initial", best)
         if rank == 0:
             atomic_write(output / "initial_validation.json", initial)
+            report(f"[initial_validation] {initial}")
         save()
     termination = "epoch_budget_exhausted"
     while epoch < cfg["max_epochs"]:
         sampler = EpochBatchSampler(
             len(training), batch_size, microbatch, rank, world, cfg["seed"], epoch, cursor
         )
+        phase("train", state="running", epoch=epoch + 1, step=step)
         batches = build_data_loader(training, cfg, batch_sampler=sampler)
         lr = optimizer.param_groups[0]["lr"]
-        for progress in train_epoch(
+        updates = train_epoch(
             batches,
             model,
             optimizer,
@@ -280,34 +305,49 @@ def _train(config, output, device, resume, stop_after_updates, model_factory):
             accumulation=accumulation,
             next_lr=next_lr,
             distributed_model=wrapped,
-        ):
-            step, update_loss, lr = progress["step"], progress["train_dsm"], progress["lr"]
-            epoch_loss += update_loss
-            epoch_count += 1
-            cursor = progress["cursor"]
-            if step % cfg["log_every_updates"] == 0:
-                loss_sum = ddp.sum_tensor(
-                    torch.tensor(update_loss, dtype=torch.float64, device=device)
+        )
+        with Progress(
+            f"Train epoch {epoch + 1}/{cfg['max_epochs']}",
+            total=updates_per_epoch,
+            initial=cursor,
+        ) as display:
+            for progress in updates:
+                step, update_loss, lr = progress["step"], progress["train_dsm"], progress["lr"]
+                epoch_loss += update_loss
+                epoch_count += 1
+                cursor = progress["cursor"]
+                memory = (
+                    torch.cuda.max_memory_allocated(device) / 2**30 if device.type == "cuda" else 0
                 )
-                if rank == 0:
-                    progress = {
-                        "state": "running",
-                        "epoch": epoch + cursor / updates_per_epoch,
-                        "step": step,
-                        "train_dsm": loss_sum.item() / world,
-                        "lr": lr,
-                        "elapsed_s": elapsed_before + time.monotonic() - start_time,
-                        "peak_allocated_gib_rank0": torch.cuda.max_memory_allocated(device) / 2**30
-                        if device.type == "cuda"
-                        else None,
-                    }
-                    atomic_write(output / "status.json", progress)
-                    print(progress, flush=True)
-            if step % cfg["checkpoint_every_updates"] == 0:
-                save()
-            if stop_after_updates is not None and step >= stop_after_updates:
-                save()
-                return
+                display(
+                    cursor,
+                    loss_rank0=f"{update_loss:.5f}",
+                    lr=f"{lr:.2g}",
+                    step=step,
+                    peak_GiB=f"{memory:.2f}",
+                )
+                if step % cfg["log_every_updates"] == 0:
+                    loss_sum = ddp.sum_tensor(
+                        torch.tensor(update_loss, dtype=torch.float64, device=device)
+                    )
+                    if rank == 0:
+                        progress = {
+                            "state": "running",
+                            "phase": "train",
+                            "epoch": epoch + cursor / updates_per_epoch,
+                            "step": step,
+                            "train_dsm": loss_sum.item() / world,
+                            "lr": lr,
+                            "elapsed_s": elapsed_before + time.monotonic() - start_time,
+                            "peak_allocated_gib_rank0": memory if device.type == "cuda" else None,
+                        }
+                        atomic_write(output / "status.json", progress)
+                        report(progress)
+                if step % cfg["checkpoint_every_updates"] == 0:
+                    save()
+                if stop_after_updates is not None and step >= stop_after_updates:
+                    save()
+                    return
         del batches
         epoch += 1
         cursor = 0
@@ -316,7 +356,14 @@ def _train(config, output, device, resume, stop_after_updates, model_factory):
         )
         decision = None
         if epoch % cfg["validate_every_epochs"] == 0 or epoch == cfg["max_epochs"]:
-            losses = validate_epoch({"raw": model, "ema": averaged}, validation, cfg, device)
+            phase("validation", state="running", epoch=epoch, step=step)
+            losses = validate_epoch(
+                {"raw": model, "ema": averaged},
+                validation,
+                cfg,
+                device,
+                description=f"Validation epoch {epoch}",
+            )
             kind = "ema"
             selected = losses[kind]
             if epoch >= cfg["warmup_epochs"]:
@@ -338,7 +385,7 @@ def _train(config, output, device, resume, stop_after_updates, model_factory):
                 publish_best(kind, selected)
             if rank == 0:
                 atomic_write(output / "history.json", history)
-                print(row, flush=True)
+                report(row)
         epoch_loss, epoch_count = 0.0, 0
         stopped = decision and decision["stop"] and epoch >= cfg["minimum_epochs"]
         if stopped:
@@ -358,4 +405,8 @@ def _train(config, output, device, resume, stop_after_updates, model_factory):
                 "best_val_dsm": best,
                 "elapsed_s": elapsed_before + time.monotonic() - start_time,
             },
+        )
+        report(
+            f"Training complete | epoch={epoch} step={step} | {termination} | "
+            f"best_val_dsm={best:.6g} | selected checkpoint: {output / 'best.pt'}"
         )

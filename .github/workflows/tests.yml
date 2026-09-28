@@ -28,6 +28,6 @@ jobs:
       - name: Install CPU dependencies
         run: |
           python -m pip install "torch==${{ matrix.torch }}" --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install "numpy<2" "matplotlib>=3.5,<4"
+          python -m pip install "numpy<2" "matplotlib>=3.5,<4" "tqdm>=4.64,<5"
       - name: Test score and energy, including two-rank Gloo
         run: python -m unittest discover -s tests -v

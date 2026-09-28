@@ -100,6 +100,63 @@ The single quotes preserve the JSON double quotes required by `--set`. Keep a se
 
 ## Training
 
+### Train from an existing cache
+
+The dedicated entry point is `train_score_branch.py`. For an already prepared
+experiment, start only training with the active Python environment:
+
+```bash
+bash scripts/train.sh --gpus 0 \
+  --config /path/to/E05-L.json --root /path/to/workspace
+```
+
+Use `--python /path/to/env/bin/python` to select an environment explicitly.
+The equivalent single-GPU Python command is:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -u train_score_branch.py \
+  --config /path/to/E05-L.json --root /path/to/workspace
+```
+
+Both score and energy configurations use this same entry. `scripts/train.sh`
+only starts training: it does not install dependencies, prepare data, rebuild
+caches, or run simulation. Pass `--gpus 0,1` for two processes; global batch must
+be divisible by `GPU count * microbatch_size`. A comma-separated mask alone does
+not distribute a plain Python invocation.
+
+Terminal/tmux runs display progress bars for cache-index checks, initial and
+epoch validation, and each training epoch. Training shows completed updates,
+elapsed time, current-epoch ETA, updates/second, rank-zero DSM loss, learning
+rate, global step and peak allocated GiB. ETA is for the current phase, not the
+whole run including future validation or early stopping. In DDP only rank zero
+displays a bar; periodic DSM log records still reduce the loss across ranks.
+
+When output is redirected/piped, progress defaults to plain lines every 30
+seconds plus phase boundaries; training metrics also follow `log_every_updates`.
+Choose `--progress on` to force terminal bars, or `--progress off` for plain logs.
+Plain output and training tracebacks are also saved automatically in
+`paths.run_dir/score/console.log`; `status.json` identifies the current phase.
+
+To keep training attached to a durable terminal, first open a tmux shell, then
+run the command above inside it:
+
+```bash
+tmux new-session -s e05_l_train
+# Activate your Python environment here, or pass --python explicitly.
+# Run scripts/train.sh with explicit --config, --root and --gpus arguments.
+```
+
+Detach with `Ctrl-b d`; return with `tmux attach -t e05_l_train`. Opening the
+shell first keeps errors visible even if training exits. Use `--resume` for an
+interrupted run with the same checkout, configuration, data and GPU count.
+**Keep existing runs on their original checkout.** This progress update changes
+source hashes, so it cannot resume a pre-update `last.pt`; old selected `best.pt`
+files remain usable for evaluation. Use a separate checkout/run directory for
+new experiments. For this iteration's energy experiment, retain the generated
+E05-L configuration rather than substituting the repository's default template.
+
+### Prepare data and run a full pipeline
+
 For the eight-model sigma/temporal/neighbor ablation on eight A100 GPUs:
 
 ```bash

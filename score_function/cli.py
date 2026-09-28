@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 
 from score_function.utils.config import configure_runtime, load_config
 
@@ -36,12 +37,21 @@ def main(argv=None):
         help="Existing dotted.key=JSON override; repeatable",
     )
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--progress",
+        choices=("auto", "on", "off"),
+        help="Terminal bars (auto/on), or periodic plain progress lines (off)",
+    )
     parser.add_argument("--gpus", type=int, default=8)
     parser.add_argument("--checkpoint")
     parser.add_argument("--split", choices=("train", "val", "test"), default="val")
     parser.add_argument("--output")
     parser.add_argument("--max-samples", type=int)
     args = parser.parse_args(argv)
+    if args.progress is not None:
+        os.environ["SCORE_FUNCTION_PROGRESS"] = args.progress
+    if args.command == "train" and int(os.environ.get("RANK", "0")) == 0:
+        print(f"Loading training config: {args.config}", flush=True)
     config = load_config(args.config, args.root, args.overrides)
     if args.device:
         config["runtime"]["device"] = args.device
@@ -59,6 +69,13 @@ def main(argv=None):
 
         check(config, args.gpus)
         return
+    if args.command == "train" and int(os.environ.get("RANK", "0")) == 0:
+        print(
+            f"Initializing {config['runtime']['device']} | "
+            f"parameterization={config['model']['parameterization']} | "
+            f"output={config['output']}",
+            flush=True,
+        )
     configure_runtime(config, require_cuda=args.command != "prepare")
     if args.command == "check-ddp":
         from score_function.tools.check_environment import check_ddp
