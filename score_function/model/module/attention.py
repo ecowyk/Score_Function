@@ -23,7 +23,18 @@ class SceneCrossAttentionBlock(nn.Module):
             nn.Dropout(dropout),
         )
 
-    def forward(self, tokens: torch.Tensor, scene: torch.Tensor) -> torch.Tensor:
-        attention, _ = self.attention(self.norm_attention(tokens), scene, scene, need_weights=False)
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        scene: torch.Tensor,
+        *,
+        use_math_attention: bool = False,
+    ) -> torch.Tensor:
+        # Energy-based scores differentiate attention twice during DSM training.
+        # need_weights=True uses the explicit attention operations, whose double
+        # backward is supported by the production PyTorch 2.0 environment.
+        attention, _ = self.attention(
+            self.norm_attention(tokens), scene, scene, need_weights=use_math_attention
+        )
         tokens = tokens + self.dropout_attention(attention)
         return tokens + self.ffn(self.norm_ffn(tokens))
