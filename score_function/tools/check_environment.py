@@ -30,7 +30,11 @@ def check_ddp(config):
             raise RuntimeError("Distributed sum failed")
         model = build_model(config, device)
         wrapped = (
-            DistributedDataParallel(model, device_ids=[device.index], broadcast_buffers=False)
+            DistributedDataParallel(
+                model,
+                device_ids=[device.index] if device.type == "cuda" else None,
+                broadcast_buffers=False,
+            )
             if ddp.world_size() > 1
             else model
         )
@@ -45,18 +49,27 @@ def check_ddp(config):
             if config["model"].get("neighbor_future")
             else {}
         )
-        score = wrapped(x + sigma * noise, *synthetic_conditions(size, device), **neighbor)
-        (sigma * score + noise).square().mean().backward()
-        if any(p.grad is None or not torch.isfinite(p.grad).all() for p in model.parameters()):
-            raise FloatingPointError("Missing/nonfinite score gradient")
+        optimizer = torch.optim.AdamW(model.parameters(), lr=config["training"]["learning_rate"])
+        # Unused parameters can fail DDP only on the next forward. Exercise both.
+        for _ in range(2):
+            optimizer.zero_grad(set_to_none=True)
+            score = wrapped(x + sigma * noise, *synthetic_conditions(size, device), **neighbor)
+            (sigma * score + noise).square().mean().backward()
+            if any(p.grad is None or not torch.isfinite(p.grad).all() for p in model.parameters()):
+                raise FloatingPointError("Missing/nonfinite score gradient")
+            optimizer.step()
         print(
             json.dumps(
                 {
                     "state": "passed",
                     "rank": ddp.rank(),
                     "microbatch": size,
+                    "parameterization": model.parameterization,
+                    "optimizer_updates": 2,
                     "score_parameters": sum(p.numel() for p in model.parameters()),
-                    "peak_allocated_gib": torch.cuda.max_memory_allocated(device) / 2**30,
+                    "peak_allocated_gib": torch.cuda.max_memory_allocated(device) / 2**30
+                    if device.type == "cuda"
+                    else None,
                 }
             ),
             flush=True,

@@ -12,8 +12,19 @@ from score_function.utils.train_utils import read_json, resolve_path
 METHOD = "score_function_v1"
 
 
+def model_config(settings):
+    """Canonical model settings; checkpoints predating this option predict scores."""
+    result = dict(settings)
+    result.setdefault("parameterization", "score")
+    if result["parameterization"] not in ("score", "energy"):
+        raise ValueError("model.parameterization must be 'score' or 'energy'")
+    return result
+
+
 def load_config(path, root=None, overrides=()):
     config = copy.deepcopy(read_json(path))
+    # Materialize the default before applying CLI overrides to legacy configs.
+    config["model"] = model_config(config["model"])
     for expression in overrides:
         key, value = expression.split("=", 1)
         parts, node = key.split("."), config
@@ -22,6 +33,7 @@ def load_config(path, root=None, overrides=()):
         if parts[-1] not in node:
             raise KeyError(f"Unknown configuration key: {key}")
         node[parts[-1]] = json.loads(value)
+    config["model"] = model_config(config["model"])
     if config.get("schema_version") != 1 or config.get("method") != METHOD:
         raise ValueError("Require this project's configs/score_function.json")
     config["paths"]["root"] = str(Path(root or config["paths"]["root"]).expanduser().resolve())

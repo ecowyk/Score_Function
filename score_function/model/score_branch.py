@@ -16,7 +16,12 @@ from score_function.model.module.temporal import TemporalResidualBlock
 
 
 class ScoreFunctionBranch(nn.Module):
-    """S4: temporal blocks, scene cross-attention, route, and point score head."""
+    """A direct score or negative energy gradient, with identical conditioning.
+
+    Both parameterizations return a [B,T,4] score from ``forward``.  The energy
+    model defines E as a sum of learned scalar point contributions, and returns
+    -grad_x E.  Its DSM objective and fixed-step refinement remain unchanged.
+    """
 
     def __init__(
         self,
@@ -30,6 +35,7 @@ class ScoreFunctionBranch(nn.Module):
         context_dim: int = 192,
         temporal_attention: bool = False,
         neighbor_future: bool = False,
+        parameterization: str = "score",
     ):
         super().__init__()
         if future_len < 1 or input_dim != 4:
@@ -38,6 +44,8 @@ class ScoreFunctionBranch(nn.Module):
             raise ValueError("hidden_dim must be positive and divisible by num_heads")
         if not 0 <= dropout < 1:
             raise ValueError("dropout must be in [0, 1)")
+        if parameterization not in ("score", "energy"):
+            raise ValueError("model.parameterization must be 'score' or 'energy'")
         pre_dilations, post_dilations = tuple(pre_dilations), tuple(post_dilations)
         if (
             not pre_dilations
@@ -53,9 +61,11 @@ class ScoreFunctionBranch(nn.Module):
         self.context_dim = context_dim
         self.hidden_dim = hidden_dim
         self.uses_neighbor_future = neighbor_future
+        self.parameterization = parameterization
         # Scene attention mixes each query with frozen scene tokens, not with
-        # other trajectory queries.  Thus this is the candidate receptive field.
-        self.temporal_receptive_field = 1 + 4 * sum((*pre_dilations, *post_dilations))
+        # other trajectory queries.  This is the backbone feature receptive-field
+        # upper bound; boundary clipping/dilation gaps can reduce actual support.
+        self.feature_receptive_field = 1 + 4 * sum((*pre_dilations, *post_dilations))
         self.point_embedding = nn.Linear(input_dim, hidden_dim)
         self.temporal_pos = nn.Parameter(torch.zeros(1, future_len, hidden_dim))
         self.scene_projection = (
@@ -79,7 +89,16 @@ class ScoreFunctionBranch(nn.Module):
             else None
         )
         if temporal_attention:
-            self.temporal_receptive_field = future_len
+            self.feature_receptive_field = future_len
+        # E is a sum of local scalar contributions.  Its derivative at point i
+        # combines every contribution whose feature window includes i, so the
+        # score can depend on a window of up to 2*R-1 points.  Retain the original
+        # direct-score metadata convention (unclipped backbone upper bound).
+        self.temporal_receptive_field = (
+            min(future_len, 2 * self.feature_receptive_field - 1)
+            if parameterization == "energy"
+            else self.feature_receptive_field
+        )
         self.post_blocks = nn.ModuleList(
             TemporalResidualBlock(hidden_dim, dilation, dropout) for dilation in post_dilations
         )
@@ -87,10 +106,98 @@ class ScoreFunctionBranch(nn.Module):
             nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, input_dim),
+            # An energy-only additive bias has identically zero DSM gradient.
+            # Omit it rather than leave an unused parameter in DDP training.
+            nn.Linear(
+                hidden_dim,
+                input_dim if parameterization == "score" else 1,
+                bias=parameterization == "score",
+            ),
         )
 
     def forward(
+        self,
+        ego_traj_norm: torch.Tensor,
+        scene_context: torch.Tensor,
+        route_embedding: torch.Tensor,
+        neighbor_future: torch.Tensor | None = None,
+        neighbor_valid: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.predict_score(
+            ego_traj_norm, scene_context, route_embedding, neighbor_future, neighbor_valid
+        )
+
+    def predict_score(
+        self,
+        ego_traj_norm: torch.Tensor,
+        scene_context: torch.Tensor,
+        route_embedding: torch.Tensor,
+        neighbor_future: torch.Tensor | None = None,
+        neighbor_valid: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Return the score, including when called under no_grad/inference_mode.
+
+        Capture the caller's gradient mode before temporarily enabling it to
+        evaluate an energy derivative.  Normal training retains the derivative
+        graph for DSM backward; no-grad inference returns a detached score.
+        An input already requiring gradients keeps its existing graph connection.
+        """
+        if self.parameterization == "score":
+            return self.score_head(
+                self._trajectory_features(
+                    ego_traj_norm,
+                    scene_context,
+                    route_embedding,
+                    neighbor_future,
+                    neighbor_valid,
+                )
+            )
+
+        create_graph = torch.is_grad_enabled() and not torch.is_inference_mode_enabled()
+        with torch.inference_mode(False), torch.enable_grad():
+            # Inference tensors cannot be saved for backward, including frozen
+            # conditioning.  Clone only those tensors; keep ordinary inputs and
+            # their gradient connections intact.
+            trajectory = self._autograd_compatible(ego_traj_norm)
+            if not trajectory.requires_grad:
+                trajectory = trajectory.detach().requires_grad_(True)
+            energy = self.energy_value(
+                trajectory,
+                self._autograd_compatible(scene_context),
+                self._autograd_compatible(route_embedding),
+                self._autograd_compatible(neighbor_future),
+                self._autograd_compatible(neighbor_valid),
+            )
+            score = -torch.autograd.grad(energy.sum(), trajectory, create_graph=create_graph)[0]
+        return score if create_graph else score.detach()
+
+    @staticmethod
+    def _autograd_compatible(tensor: torch.Tensor | None) -> torch.Tensor | None:
+        if tensor is not None and torch.is_inference(tensor):
+            return tensor.clone()
+        return tensor
+
+    def energy_value(
+        self,
+        ego_traj_norm: torch.Tensor,
+        scene_context: torch.Tensor,
+        route_embedding: torch.Tensor,
+        neighbor_future: torch.Tensor | None = None,
+        neighbor_valid: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Return E(x,C) as [B]; its absolute additive offset is unidentifiable.
+
+        This method follows the caller's gradient mode, like an ordinary module
+        forward.  Use ``predict_score`` for energy gradients under no_grad.
+        """
+        if self.parameterization != "energy":
+            raise ValueError("energy_value requires model.parameterization='energy'")
+        tokens = self._trajectory_features(
+            ego_traj_norm, scene_context, route_embedding, neighbor_future, neighbor_valid
+        )
+        return self.score_head(tokens).sum(dim=(1, 2))
+
+    def _trajectory_features(
         self,
         ego_traj_norm: torch.Tensor,
         scene_context: torch.Tensor,
@@ -122,13 +229,26 @@ class ScoreFunctionBranch(nn.Module):
         )
         for block in self.pre_blocks:
             tokens = block(tokens)
-        tokens = self.scene_attention(tokens, self.scene_projection(scene_context))
+        use_math_attention = self.parameterization == "energy"
+        tokens = self.scene_attention(
+            tokens,
+            self.scene_projection(scene_context),
+            use_math_attention=use_math_attention,
+        )
         if self.neighbor_attention is not None:
-            tokens = self.neighbor_attention(tokens, neighbor_future, neighbor_valid)
-        tokens = self.global_attention(tokens)
+            tokens = self.neighbor_attention(
+                tokens,
+                neighbor_future,
+                neighbor_valid,
+                use_math_attention=use_math_attention,
+            )
+        if isinstance(self.global_attention, TemporalSelfAttentionBlock):
+            tokens = self.global_attention(tokens, use_math_attention=use_math_attention)
+        else:
+            tokens = self.global_attention(tokens)
         for block in self.post_blocks:
             tokens = block(tokens)
-        return self.score_head(tokens)
+        return tokens
 
 
 def build_model(config: dict, device: torch.device | str) -> ScoreFunctionBranch:

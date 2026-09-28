@@ -17,8 +17,18 @@ class TemporalSelfAttentionBlock(nn.Module):
             norm_first=True,
         )
 
-    def forward(self, tokens):
-        return self.layer(tokens)
+    def forward(self, tokens, *, use_math_attention=False):
+        if not use_math_attention:
+            return self.layer(tokens)
+        # Match the pre-norm TransformerEncoderLayer above without its fused
+        # inference/SDPA paths: DSM of an energy gradient needs double backward.
+        layer = self.layer
+        normalized = layer.norm1(tokens)
+        attention, _ = layer.self_attn(normalized, normalized, normalized, need_weights=True)
+        tokens = tokens + layer.dropout1(attention)
+        normalized = layer.norm2(tokens)
+        feedforward = layer.linear2(layer.dropout(layer.activation(layer.linear1(normalized))))
+        return tokens + layer.dropout2(feedforward)
 
 
 class NeighborFutureAttention(nn.Module):
@@ -39,7 +49,7 @@ class NeighborFutureAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.future_len = future_len
 
-    def forward(self, tokens, future, valid):
+    def forward(self, tokens, future, valid, *, use_math_attention=False):
         batch = tokens.shape[0]
         if future is None or valid is None:
             raise ValueError("This branch requires predicted neighbor futures and their valid mask")
@@ -52,6 +62,10 @@ class NeighborFutureAttention(nn.Module):
         condition = torch.cat((self.null_token.expand(batch, -1, -1), condition), dim=1)
         padding = torch.cat((valid.new_zeros(batch, 1), ~valid), dim=1)
         value, _ = self.attention(
-            self.norm(tokens), condition, condition, key_padding_mask=padding, need_weights=False
+            self.norm(tokens),
+            condition,
+            condition,
+            key_padding_mask=padding,
+            need_weights=use_math_attention,
         )
         return tokens + self.dropout(value)

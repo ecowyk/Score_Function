@@ -54,6 +54,7 @@ def refine_ego(
     disabled = gamma == 0 or steps == 0
     trace = {
         "sigma": float(sigma),
+        "parameterization": getattr(score_branch, "parameterization", "score"),
         "gamma": float(gamma),
         "requested_steps": steps,
         "completed_steps": 0,

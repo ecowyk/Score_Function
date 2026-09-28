@@ -1,0 +1,33 @@
+name: CPU tests
+
+on:
+  push:
+    branches: [main, codex/score-energy-parameterization]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        torch: ["2.0.1", "2.5.1"]
+    env:
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CPU dependencies
+        run: |
+          python -m pip install "torch==${{ matrix.torch }}" --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install "numpy<2" "matplotlib>=3.5,<4"
+      - name: Test score and energy, including two-rank Gloo
+        run: python -m unittest discover -s tests -v

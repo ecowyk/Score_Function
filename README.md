@@ -6,7 +6,7 @@ The model learns a fixed-noise-scale score from expert trajectories, conditioned
 
 ## Method
 
-The score network combines temporal residual convolutions, scene cross-attention, and route conditioning. Its input and output are normalized ego trajectories with shape `[B, 80, 4]`, where each point contains `(x, y, cos(theta), sin(theta))`.
+The score network combines temporal residual convolutions, scene cross-attention, and route conditioning. Its normalized trajectory input and score output both have shape `[B, 80, 4]`, with trajectory coordinates `(x, y, cos(theta), sin(theta))`. Scores are derivatives with respect to these normalized coordinates.
 
 Training uses fixed-scale denoising score matching:
 
@@ -26,6 +26,15 @@ x_{k+1} = x_k + \gamma\sigma^2 s_\theta(x_k,C,R).
 $$
 
 The score network receives no diffusion timestep. Scene and route features remain fixed during refinement. Optional heading projection normalizes the heading vectors after each update.
+
+Two parameterizations share this same fixed-sigma DSM objective and fixed-step refinement:
+
+| `model.parameterization` | Score computation |
+|---|---|
+| `"score"` (default) | Directly predicts the `[B, 80, 4]` score. |
+| `"energy"` | Predicts one scalar energy per trajectory and returns $s_\theta=-\nabla_x E_\theta$, also `[B, 80, 4]`. |
+
+The energy is the sum of learned per-token scalar contributions. It adds an input-gradient computation at inference and double backward during DSM training; its attention uses explicit math operations to support those derivatives. Expect higher runtime and memory cost. This is an engineering option, with no evidence yet of better trajectory quality or closed-loop performance. See the [parameterization guide](docs/parameterization.md) for the API, checks, and checkpoint rules.
 
 | Setting | Default |
 |---|---:|
@@ -78,6 +87,17 @@ python -m score_function check-config \
   --config configs/score_function.json --root "$ROOT"
 ```
 
+For energy training, use [configs/score_function_energy.json](configs/score_function_energy.json). It changes only `model.parameterization` to `"energy"` and `paths.run_dir` to `outputs/score_function_energy`; it reuses the same feature cache. The equivalent CLI override is:
+
+```bash
+python -m score_function check-config \
+  --config configs/score_function.json --root "$ROOT" \
+  --set 'model.parameterization="energy"' \
+  --set 'paths.run_dir="outputs/score_function_energy"'
+```
+
+The single quotes preserve the JSON double quotes required by `--set`. Keep a separate run directory for each parameterization.
+
 ## Training
 
 For the eight-model sigma/temporal/neighbor ablation on eight A100 GPUs:
@@ -108,6 +128,15 @@ tmux attach -t score_function_train_wyk
 
 Change the GPU list to match the available devices. The global batch size must be divisible by the number of GPUs times the microbatch size.
 
+To use the energy configuration with this launcher:
+
+```bash
+bash scripts/train_tmux.sh "$ROOT" 0,1,2,3,4,5,6,7 \
+  "$PWD/configs/score_function_energy.json" fresh
+```
+
+The launcher uses the same tmux session name for both configurations; finish or close an existing launcher session before starting another. Run the guide's [GPU and cache smoke checks](docs/parameterization.md#server-checks-and-training) before a full energy run.
+
 Resume an interrupted run:
 
 ```bash
@@ -120,6 +149,8 @@ Checkpoints are saved under `outputs/score_function/score/`:
 - `best.pt`: selected score model for evaluation.
 - `last.pt`: full training state for resuming.
 - `history.json`: training and validation metrics.
+
+The energy configuration writes these files under `outputs/score_function_energy/score/`. Older selected direct-score checkpoints without a `parameterization` field load as `"score"`; score/energy mismatches are rejected. Strict resume still requires unchanged source hashes, data, world size, and training configuration, so selected-weight compatibility does not imply that an older-version training run can resume after this code change.
 
 ## Evaluation
 
@@ -142,6 +173,8 @@ python -m score_function evaluate-planner \
 ```
 
 Offline evaluation saves metrics, per-sample results, refinement traces, and trajectory plots. Use `--set refinement.steps=3` or other existing configuration keys to override evaluation settings.
+
+For an energy checkpoint, use `--config configs/score_function_energy.json` and `--checkpoint "$ROOT/outputs/score_function_energy/score/best.pt"` in both commands. Evaluation must match the checkpoint's parameterization, architecture, and training sigma.
 
 For official nuPlan closed-loop evaluation, configure [configs/nuplan_planner.yaml](configs/nuplan_planner.yaml) and use `score_function.planner.planner.ScoreFunctionPlanner` in the nuPlan simulation runner. Setting `gamma=0` disables refinement for a paired baseline.
 
