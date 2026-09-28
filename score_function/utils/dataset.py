@@ -52,7 +52,9 @@ def validate_shard(directory, identity=None, checksums=True):
 
 
 class ShardedDataset(Dataset):
-    def __init__(self, index_path, split=None, max_open_shards=16, neighbor_index=None):
+    def __init__(
+        self, index_path, split=None, max_open_shards=16, neighbor_index=None, progress=None
+    ):
         self.index_path = Path(index_path)
         index = read_json(self.index_path)
         if index.get("schema_version") != 1 or index.get("method") != "score_function_v1":
@@ -77,6 +79,8 @@ class ShardedDataset(Dataset):
         self.records, self.locations = [], []
         seen, recordings = set(), {}
         root = self.index_path.parent.resolve()
+        if progress is not None:
+            progress(0, len(self.shards))
         for number, item in enumerate(self.shards):
             directory = (root / item["path"]).resolve()
             if not directory.is_relative_to(root):
@@ -116,6 +120,8 @@ class ShardedDataset(Dataset):
                 if split is None or part == split:
                     self.records.append(record)
                     self.locations.append((number, offset))
+            if progress is not None:
+                progress(number + 1, len(self.shards))
         if len(seen) // 2 != self.metadata["samples"] or not self.records:
             raise ValueError(f"Count mismatch or empty split: {split}")
         self.max_open_shards = max_open_shards
