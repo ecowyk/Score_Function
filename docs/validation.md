@@ -1,3 +1,22 @@
+## 2026-09-28 Score / energy 参数化
+
+- 新增 `model.parameterization=score|energy`，保留固定 σ DSM 和固定步长精炼。
+- 本地 PyTorch 2.5.1 CPU：45 项测试通过，4 项依赖官方仓库/真实数据的测试跳过；
+  另有 3 项多进程通信测试因当前执行环境限制 socket 未在本地完成。
+- PyTorch 2.0.1 CPU：能量有限差分、三类 attention 的二阶反传、冻结参数推理、
+  heading 投影和固定腐蚀拟合共 5 项通过；训练/EMA 验证、旧 checkpoint、精确恢复
+  和参数化拒绝加载共 3 项测试通过。Gloo 多进程检查受同一环境限制。
+- 与本次改动前的原 `score_branch.py` 对比，local、global attention、neighbor 三种
+  direct-score 配置的初始化权重及冻结模型输出逐位一致。
+- 全仓 Ruff lint、本次改动文件的 Ruff format、Git whitespace 检查通过。
+- 增加 GitHub Actions CPU 测试矩阵（PyTorch 2.0.1 / 2.5.1），用于运行完整测试，
+  包括双进程 Gloo 更新与精确恢复。本地验收时，GitHub 连接创建分支返回 403；
+  以上仅为本地验收结果，不能把未完成的多进程检查计为通过。完整多进程测试
+  结果以对应提交的 GitHub Actions 运行记录为准。
+- 学校服务器 SSH 在认证前返回 `Network is unreachable`；未登录服务器，未进行
+  CUDA/NCCL、官方 planner 接口、真实数据训练或闭环测试，也未修改服务器环境。
+  本次检查仅验证工程正确性，不证明 energy 参数化提高规划得分。
+
 ## 2026-09-25 全局 1M 场景预处理
 
 - 学校 4093 官方环境完整 43 项测试通过，包含新增全局 cap、筛选参数、
