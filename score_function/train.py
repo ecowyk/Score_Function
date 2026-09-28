@@ -13,7 +13,7 @@ from torch.nn.parallel import DistributedDataParallel
 from score_function.model.score_branch import build_model
 from score_function.train_epoch import train_epoch, validate_epoch
 from score_function.utils import ddp
-from score_function.utils.config import METHOD
+from score_function.utils.config import METHOD, model_config
 from score_function.utils.dataset import (
     EpochBatchSampler,
     ShardedDataset,
@@ -34,6 +34,8 @@ from score_function.utils.train_utils import (
 
 def train(config, resume=False, device_override=None, stop_after_updates=None, model_factory=None):
     """stop_after_updates is used only by isolated integration tests, not the CLI."""
+    config = copy.deepcopy(config)
+    config["model"] = model_config(config["model"])
     device = torch.device(device_override or config["runtime"]["device"])
     ddp.setup(device)
     output = Path(config["output"]) / "score"
@@ -160,6 +162,7 @@ def _train(config, output, device, resume, stop_after_updates, model_factory):
         atomic_write(
             output / "model_info.json",
             {
+                "parameterization": config["model"]["parameterization"],
                 "parameters": sum(p.numel() for p in model.parameters()),
                 "trainable_score_parameters": sum(p.numel() for p in model.parameters()),
                 "base_planner_in_training_graph": False,
