@@ -85,6 +85,39 @@ def load_config(path, root=None, overrides=()):
         or not 1 <= cfg["minimum_epochs"] <= cfg["max_epochs"]
     ):
         raise ValueError("Invalid warmup/minimum/max epochs")
+    for key in ("max_epochs", "minimum_epochs", "warmup_epochs", "batch_size", "microbatch_size"):
+        if not isinstance(cfg[key], int) or isinstance(cfg[key], bool):
+            raise ValueError(f"training.{key} must be an integer")
+    minimum_updates = cfg.get("minimum_updates", 0)
+    if (
+        not isinstance(minimum_updates, int)
+        or isinstance(minimum_updates, bool)
+        or minimum_updates < 0
+    ):
+        raise ValueError("training.minimum_updates must be a nonnegative integer")
+    if cfg.get("lr_schedule", "validation_plateau") not in (
+        "validation_plateau",
+        "constant_after_warmup",
+    ):
+        raise ValueError("Invalid training.lr_schedule")
+    if not isinstance(cfg.get("early_stopping", True), bool):
+        raise ValueError("training.early_stopping must be boolean")
+    augmentation = cfg.get("data_augmentation", {"enabled": False})
+    if not isinstance(augmentation, dict) or not isinstance(augmentation.get("enabled"), bool):
+        raise ValueError("training.data_augmentation.enabled must be boolean")
+    if augmentation["enabled"]:
+        probability = augmentation.get("probability")
+        encoding_batch_size = augmentation.get("encoding_batch_size")
+        if (
+            not isinstance(probability, (int, float))
+            or isinstance(probability, bool)
+            or not math.isfinite(probability)
+            or not 0 <= probability <= 1
+            or not isinstance(encoding_batch_size, int)
+            or isinstance(encoding_batch_size, bool)
+            or encoding_batch_size < 1
+        ):
+            raise ValueError("Invalid online augmentation probability/encoding batch size")
     if (
         cfg["batch_size"] % cfg["microbatch_size"]
         or cfg["num_workers"] < 0

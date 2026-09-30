@@ -86,11 +86,16 @@ Preprocessing uses 16 CPU workers; each trainer uses two data-loader workers.
 Training is fixed-sigma DSM on normalized expert ego futures only.
 The frozen planner supplies scene/route features. No timestep enters the score
 network; neither current ego pose nor neighbor futures are optimization targets.
-AdamW uses LR 1e-4, weight decay 1e-4, gradient clipping 5, EMA 0.999,
-and one epoch of linear warmup from 1e-5.
+The current defaults use AdamW LR 5e-4, weight decay 0.01, gradient clipping 5,
+EMA 0.999 without EMA warmup, and five epochs of official epoch-wise warmup
+from 5e-5 followed by a constant LR.
 Every epoch evaluates eight fixed validation corruptions.
-Three checks without a 0.5% significant EMA DSM improvement halve LR; eight checks
-trigger early stopping after at least five epochs. Thirty epochs is the ceiling.
+Training completes at least 500 epochs and 244,000 optimizer updates; the actual
+epoch budget is extended to meet the update floor after splitting/filtering.
+Plateau LR reduction and early stopping are disabled in new default configs.
+Old generated configs keep their old schedule unless a new aligned config is created.
+Training applies official paired state augmentation online before frozen encoding;
+the clean cache is used for validation. See [alignment.md](alignment.md).
 The selected checkpoint is the minimum validation DSM among the initial branch
 and subsequent EMA branches. An initial selection remains explicitly labeled.
 

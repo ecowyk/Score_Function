@@ -1,3 +1,12 @@
+## 2026-09-30 训练对齐与长程轨迹诊断
+
+- 本地 PyTorch 2.5.1 CPU：67 项通过、15 个 subtest 通过；6 项依赖可选官方源码或真实环境的检查跳过，2 项多进程检查未在本地完成。
+- 指定官方 DP checkout 后，在线训练数据模块 4 项测试全部通过。增强一致性检查直接执行官方 `StatePerturbation` 源码，仅用车辆轴距替身提供其 nuPlan 导入依赖；并未模拟或替换增强算法。
+- 新检查覆盖实际训练集下的预算补足、官方学习率序列、最低预算内禁止早停、精确恢复、旧配置/结果保护、配对增强、邻车条件同步及逐次原始 NPZ 校验。
+- 长程诊断对可解析 Gaussian score 和 quadratic energy 分别执行 5000 次更新；验证稀疏快照、投影数值一致、固定条件、数值失败保留最后有效轨迹、CSV/NPZ/HTML 输出。合成轨迹图已人工检查。
+- Ruff lint 与 Git whitespace 检查通过。GitHub Actions 保留 PyTorch 2.0.1/2.5.1 的完整测试矩阵（包括 spawn DataLoader 和两进程 Gloo），并增加固定版本官方增强源码对照。CI 的通过情况以对应提交运行结果为准。
+- 未访问用户服务器，未运行真实 nuPlan 数据训练、CUDA/NCCL 或闭环评测。工程测试不能证明当前真实权重收敛、几千步 refine 稳定或规划分数提升。
+
 ## 2026-09-28 Score / energy 参数化
 
 - 新增 `model.parameterization=score|energy`，保留固定 σ DSM 和固定步长精炼。

@@ -34,6 +34,10 @@ def fixture(root):
     config["training"].update(
         max_epochs=2,
         minimum_epochs=1,
+        minimum_updates=0,
+        lr_schedule="validation_plateau",
+        early_stopping=True,
+        data_augmentation={"enabled": False},
         batch_size=4,
         microbatch_size=1,
         warmup_epochs=0,
@@ -227,7 +231,7 @@ class PipelineTests(unittest.TestCase):
                 load_selected(changed, checkpoint, "cpu")
 
     def _assert_state_equal(self, full, resumed):
-        for name in ("step", "epoch", "cursor", "plateau", "best"):
+        for name in ("step", "epoch", "cursor", "plateau", "best", "sample_presentations"):
             self.assertEqual(full[name], resumed[name])
         for kind in ("score_branch", "ema_branch"):
             self.assertEqual(set(full[kind]), set(resumed[kind]))

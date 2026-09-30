@@ -67,6 +67,10 @@ class EndToEndTests(unittest.TestCase):
             config["training"].update(
                 max_epochs=1,
                 minimum_epochs=1,
+                minimum_updates=0,
+                lr_schedule="validation_plateau",
+                early_stopping=True,
+                data_augmentation={"enabled": False},
                 warmup_epochs=0,
                 batch_size=4,
                 microbatch_size=1,

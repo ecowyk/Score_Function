@@ -11,6 +11,7 @@ from score_function.utils.ema import update_ema
 from score_function.utils.neighbor import neighbor_kwargs
 from score_function.utils.progress import Progress
 from score_function.utils.train_utils import sample_noise
+from score_function.utils.training_budget import learning_rate_at_step
 
 
 @torch.no_grad()
@@ -59,6 +60,7 @@ def train_epoch(
     accumulation,
     next_lr,
     distributed_model=None,
+    batch_transform=None,
 ):
     """Yield each completed optimizer update so the driver can save exact progress.
 
@@ -72,20 +74,18 @@ def train_epoch(
     model.train()
     step = start_step
     for update in range(start_update, updates_per_epoch):
-        warmup_updates = cfg["warmup_epochs"] * updates_per_epoch
-        fraction = min(1.0, step / max(1, warmup_updates - 1))
-        lr = (
-            cfg["warmup_learning_rate"]
-            + fraction * (cfg["learning_rate"] - cfg["warmup_learning_rate"])
-            if step < warmup_updates
-            else next_lr
-        )
+        lr = learning_rate_at_step(cfg, step, updates_per_epoch, next_lr)
         for group in optimizer.param_groups:
             group["lr"] = lr
         optimizer.zero_grad(set_to_none=True)
         update_loss = 0.0
+        sample_presentations = 0
         for micro in range(accumulation):
             batch = device_batch(next(batches), device)
+            if batch_transform is not None:
+                with torch.no_grad():
+                    batch = batch_transform(batch)
+            sample_presentations += batch["target"].shape[0] * world
             noise = torch.randn_like(batch["target"])
             sync = wrapped.no_sync() if world > 1 and micro < accumulation - 1 else nullcontext()
             with sync:
@@ -111,4 +111,10 @@ def train_epoch(
             else cfg["ema_decay"]
         )
         update_ema(averaged, model, decay)
-        yield {"step": step, "cursor": update + 1, "train_dsm": update_loss, "lr": lr}
+        yield {
+            "step": step,
+            "cursor": update + 1,
+            "train_dsm": update_loss,
+            "lr": lr,
+            "sample_presentations": sample_presentations,
+        }

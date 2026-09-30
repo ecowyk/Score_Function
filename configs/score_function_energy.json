@@ -11,7 +11,7 @@
     "data_output": "score_data/score_function",
     "manifest": "score_data/score_function/features_manifest.json",
     "cache": "score_data/score_function/cache/index.json",
-    "run_dir": "outputs/score_function_energy",
+    "run_dir": "outputs/score_function_energy_aligned",
     "train_log_allowlist": "Diffusion-Planner/nuplan_train.json"
   },
   "model": {
@@ -35,16 +35,16 @@
   "training": {
     "seed": 20260924,
     "sigma": 0.05,
-    "max_epochs": 30,
-    "minimum_epochs": 5,
+    "max_epochs": 500,
+    "minimum_epochs": 500,
     "batch_size": 2048,
     "microbatch_size": 64,
     "ema_decay": 0.999,
-    "ema_warmup": true,
-    "warmup_epochs": 1,
-    "warmup_learning_rate": 1e-05,
-    "learning_rate": 0.0001,
-    "weight_decay": 0.0001,
+    "ema_warmup": false,
+    "warmup_epochs": 5,
+    "warmup_learning_rate": 5e-05,
+    "learning_rate": 0.0005,
+    "weight_decay": 0.01,
     "gradient_clip": 5.0,
     "validate_every_epochs": 1,
     "validation_seed": 20260924,
@@ -59,6 +59,14 @@
       "stop_patience": 8,
       "relative_improvement": 0.005,
       "minimum_learning_rate": 1e-06
+    },
+    "minimum_updates": 244000,
+    "lr_schedule": "constant_after_warmup",
+    "early_stopping": false,
+    "data_augmentation": {
+      "enabled": true,
+      "probability": 0.5,
+      "encoding_batch_size": 64
     }
   },
   "data": {
@@ -106,5 +114,27 @@
     "frames": 4,
     "updates": 200,
     "learning_rate": 0.0005
+  },
+  "long_refinement": {
+    "steps": 5000,
+    "snapshot_steps": [
+      0,
+      5,
+      20,
+      100,
+      500,
+      1000,
+      2000,
+      5000
+    ],
+    "max_samples": 8,
+    "initializations": [
+      "planner",
+      "expert_noise"
+    ],
+    "seed": 20260930,
+    "convergence_window": 50,
+    "convergence_step_m": 0.0001,
+    "future_dt": 0.1
   }
 }

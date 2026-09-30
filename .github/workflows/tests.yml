@@ -31,3 +31,13 @@ jobs:
           python -m pip install "numpy<2" "matplotlib>=3.5,<4" "tqdm>=4.64,<5"
       - name: Test score and energy, including two-rank Gloo
         run: python -m unittest discover -s tests -v
+      - name: Check out pinned official augmentation source
+        uses: actions/checkout@v4
+        with:
+          repository: ZhengYinan-AIR/Diffusion-Planner
+          ref: a3a621f0b724c5fa6447f7a2fbaf9e0387bd35df
+          path: .test-assets/Diffusion-Planner
+      - name: Compare paired augmentation with official code
+        env:
+          SCORE_FUNCTION_OFFICIAL_ROOT: ${{ github.workspace }}/.test-assets/Diffusion-Planner
+        run: python -m unittest discover -s tests -p test_online_training.py -v

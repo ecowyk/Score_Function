@@ -65,7 +65,9 @@ sigma固定为该run的超参数，默认pilot=.05；没有t采样、VP换算或
 
 8卡默认有效batch2048=8×64×4累积。每epoch对全部训练帧全局shuffle，不重复取样，丢弃不足一个global batch的尾部；下epoch尾部随shuffle改变。固定8份验证噪声按frame token确定，所有rank无补齐重复，逐元素求和后聚合。
 
-新文档没有规定精确调度，本实现明确采用：AdamW lr1e-4、weight_decay1e-4、grad_clip5；1epoch从1e-5 warmup到1e-4；EMA目标.999带初期warmup。每epoch验证，改善阈值.5%，3次无显著改善学习率减半，最低1e-6；8次无显著改善且至少5epochs时早停。30epochs为上限。全部可配置。
+2026-09-30 对齐后的默认协议：AdamW lr5e-4、weight_decay0.01、grad_clip5；5epoch按官方逐epoch线性warmup从5e-5到5e-4，随后恒定；EMA .999不做初期warmup。至少500epochs且244000次optimizer update，按实际训练帧数计算需要的总epoch；默认禁用plateau降学习率和早停。每epoch验证。旧生成配置缺少新字段时仍保留原来的30epoch/plateau行为，迁移必须生成新配置并使用新run目录。操作见[alignment.md](alignment.md)。
+
+当前默认训练每次读取原始NPZ，先调用官方StatePerturbation同步变换场景和专家目标，再归一化并用冻结encoder重新编码；含邻车条件时从同一增强后的输入重新预测邻车。干净缓存用于划分、身份核对和验证，不直接作为增强样本的条件。
 
 checkpoint选择只比较初始分支和各次验证的EMA分支，按验证DSM实际最小值；raw验证用于记录，不根据test挑选权重。若选择initial，需如实报告没有改善验证目标。早停说明所设验证目标进入plateau，不等于真实score误差已知，更不等于ascent到达峰值。
 
@@ -81,7 +83,7 @@ checkpoint选择只比较初始分支和各次验证的EMA分支，按验证DSM�
 x[k+1] = x[k] + gamma * sigma^2 * s(x[k],C,R)
 ```
 
-默认gamma=.1、K=5；严格执行给定K，没有一万步/两万步搜索，也不根据预算退出宣布收敛。每次重新计算候选score，C/R固定。默认heading投影开启，在物理cos/sin坐标归一化，再映射回normalized；零向量先回退到上一步有效朝向，否则使用(1,0)。gamma=0或K=0时在物理预测层提前返回，连归一化往返和投影都不执行，保证baseline一致性。
+部署默认gamma=.1、K=5；严格执行给定K。独立`visualize-refinement`命令默认固定场景迭代5000步，保存稀疏轨迹快照和逐步诊断；不根据预算退出宣布达到密度峰值。每次重新计算候选score，C/R固定。默认heading投影开启，在物理cos/sin坐标归一化，再映射回normalized；零向量先回退到上一步有效朝向，否则使用(1,0)。gamma=0或K=0时在物理预测层提前返回，连归一化往返和投影都不执行，保证baseline一致性。
 
 仅替换prediction[:,0]，prediction[:,1:]逐项不变。最终继续使用官方atan2、坐标转换和nuPlan trajectory构造。当前ego state不在优化张量中。
 

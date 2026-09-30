@@ -44,8 +44,18 @@ The energy is the sum of learned per-token scalar contributions. It adds an inpu
 | Refinement steps | 5 |
 | Global batch size | 2048 |
 | Optimizer | AdamW |
-| Initial learning rate | 1e-4 |
+| Peak learning rate / warmup | 5e-4 / 5 epochs from 5e-5 |
+| AdamW weight decay | 0.01 |
+| Training budget | At least 500 epochs and 244,000 optimizer updates |
+| Learning-rate decay / early stopping | Disabled in the aligned defaults |
+| Paired state augmentation | Official DP `StatePerturbation`, probability 0.5 |
 | EMA decay | 0.999 |
+
+The current defaults align training budget and state augmentation with the official
+DP recipe. Actual epochs increase when the internal validation split leaves fewer
+training frames, so both budget floors are met. Architecture and the fixed-sigma
+ego DSM objective remain unchanged. See [alignment and long-refinement diagnostics](docs/alignment.md)
+for migration from existing runs and the exact scope of this alignment.
 
 ## Installation
 
@@ -77,7 +87,7 @@ workspace/
 │   ├── nuplan-v1.1/trainval/
 │   └── maps/
 ├── score_data/score_function/
-└── outputs/score_function/
+└── outputs/score_function_aligned/
 ```
 
 ```bash
@@ -87,13 +97,13 @@ python -m score_function check-config \
   --config configs/score_function.json --root "$ROOT"
 ```
 
-For energy training, use [configs/score_function_energy.json](configs/score_function_energy.json). It changes only `model.parameterization` to `"energy"` and `paths.run_dir` to `outputs/score_function_energy`; it reuses the same feature cache. The equivalent CLI override is:
+For energy training, use [configs/score_function_energy.json](configs/score_function_energy.json). It changes only `model.parameterization` to `"energy"` and `paths.run_dir` to `outputs/score_function_energy_aligned`; it reuses the same feature cache. The equivalent CLI override is:
 
 ```bash
 python -m score_function check-config \
   --config configs/score_function.json --root "$ROOT" \
   --set 'model.parameterization="energy"' \
-  --set 'paths.run_dir="outputs/score_function_energy"'
+  --set 'paths.run_dir="outputs/score_function_energy_aligned"'
 ```
 
 The single quotes preserve the JSON double quotes required by `--set`. Keep a separate run directory for each parameterization.
@@ -149,11 +159,12 @@ tmux new-session -s e05_l_train
 Detach with `Ctrl-b d`; return with `tmux attach -t e05_l_train`. Opening the
 shell first keeps errors visible even if training exits. Use `--resume` for an
 interrupted run with the same checkout, configuration, data and GPU count.
-**Keep existing runs on their original checkout.** This progress update changes
+**Keep existing runs on their original checkout.** This update changes
 source hashes, so it cannot resume a pre-update `last.pt`; old selected `best.pt`
 files remain usable for evaluation. Use a separate checkout/run directory for
-new experiments. For this iteration's energy experiment, retain the generated
-E05-L configuration rather than substituting the repository's default template.
+new experiments. Existing generated configurations retain their original budget.
+Use `scripts/prepare_aligned_config.py` to create a new aligned configuration while
+preserving an existing model variant, sigma and data paths; see the alignment guide.
 
 ### Prepare data and run a full pipeline
 
@@ -174,7 +185,14 @@ without timestamp thinning. See the
 [experiment suite guide](docs/experiment_suite.md) for the matrix, existing-environment
 option, paths, logs, and resume commands.
 
-The training pipeline prepares nuPlan features, caches the frozen scene and route encodings, and trains the score branch. Checkpoint selection uses validation DSM with EMA and plateau-based learning-rate reduction and early stopping.
+The training pipeline prepares nuPlan features and a clean cache for split identity
+and validation. With online augmentation enabled, training reads the original NPZs,
+jointly perturbs the scene and target using official DP code, then recomputes frozen
+scene/route features. Neighbor-conditioned variants also predict fresh neighbors
+from that same augmented observation. Validation remains clean and deterministic.
+Checkpoint selection uses validation DSM with EMA. The aligned defaults complete
+the full budget without plateau LR reduction or early stopping; older configs
+without the new options retain their original behavior.
 
 Run on eight GPUs in tmux:
 
@@ -201,22 +219,39 @@ bash scripts/train_tmux.sh "$ROOT" 0,1,2,3,4,5,6,7 \
   "$PWD/configs/score_function.json" resume
 ```
 
-Checkpoints are saved under `outputs/score_function/score/`:
+Checkpoints are saved under `outputs/score_function_aligned/score/`:
 
 - `best.pt`: selected score model for evaluation.
 - `last.pt`: full training state for resuming.
 - `history.json`: training and validation metrics.
 
-The energy configuration writes these files under `outputs/score_function_energy/score/`. Older selected direct-score checkpoints without a `parameterization` field load as `"score"`; score/energy mismatches are rejected. Strict resume still requires unchanged source hashes, data, world size, and training configuration, so selected-weight compatibility does not imply that an older-version training run can resume after this code change.
+The energy configuration writes these files under `outputs/score_function_energy_aligned/score/`. Older selected direct-score checkpoints without a `parameterization` field load as `"score"`; score/energy mismatches are rejected. Strict resume still requires unchanged source hashes, data, world size, and training configuration, so selected-weight compatibility does not imply that an older-version training run can resume after this code change.
 
 ## Evaluation
+
+Inspect long refinement on existing score or energy weights before further
+closed-loop evaluations:
+
+```bash
+python -m score_function visualize-refinement \
+  --config /path/to/the/checkpoints/original-config.json --root "$ROOT" \
+  --checkpoint /path/to/score/best.pt \
+  --split val --max-samples 8 --steps 5000 \
+  --output "$ROOT/outputs/refinement_5000_val"
+```
+
+This fixed-scene diagnostic uses both DP outputs and expert-plus-fixed-noise
+initializations. It writes sparse trajectory snapshots, physical motion plots,
+per-update diagnostics, energy curves for energy models, and an HTML index. It
+does not advance the simulator or retrain weights. Use a new output directory
+for each call. Details and train/validation commands are in the alignment guide.
 
 Evaluate fixed-noise expert-trajectory diagnostics:
 
 ```bash
 python eval_score_branch.py \
   --config configs/score_function.json --root "$ROOT" \
-  --checkpoint "$ROOT/outputs/score_function/score/best.pt" \
+  --checkpoint "$ROOT/outputs/score_function_aligned/score/best.pt" \
   --split val
 ```
 
@@ -225,13 +260,13 @@ Compare planner trajectories before and after refinement:
 ```bash
 python -m score_function evaluate-planner \
   --config configs/score_function.json --root "$ROOT" \
-  --checkpoint "$ROOT/outputs/score_function/score/best.pt" \
+  --checkpoint "$ROOT/outputs/score_function_aligned/score/best.pt" \
   --split val --max-samples 100
 ```
 
 Offline evaluation saves metrics, per-sample results, refinement traces, and trajectory plots. Use `--set refinement.steps=3` or other existing configuration keys to override evaluation settings.
 
-For an energy checkpoint, use `--config configs/score_function_energy.json` and `--checkpoint "$ROOT/outputs/score_function_energy/score/best.pt"` in both commands. Evaluation must match the checkpoint's parameterization, architecture, and training sigma.
+For an energy checkpoint, use `--config configs/score_function_energy.json` and `--checkpoint "$ROOT/outputs/score_function_energy_aligned/score/best.pt"` in both commands. Evaluation must match the checkpoint's parameterization, architecture, and training sigma.
 
 For official nuPlan closed-loop evaluation, configure [configs/nuplan_planner.yaml](configs/nuplan_planner.yaml) and use `score_function.planner.planner.ScoreFunctionPlanner` in the nuPlan simulation runner. Setting `gamma=0` disables refinement for a paired baseline.
 

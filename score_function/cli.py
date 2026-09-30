@@ -24,6 +24,7 @@ def main(argv=None):
             "train",
             "evaluate",
             "evaluate-planner",
+            "visualize-refinement",
         ),
     )
     parser.add_argument("--config", required=True)
@@ -47,6 +48,21 @@ def main(argv=None):
     parser.add_argument("--split", choices=("train", "val", "test"), default="val")
     parser.add_argument("--output")
     parser.add_argument("--max-samples", type=int)
+    parser.add_argument("--steps", type=int, help="Long-refinement diagnostic update budget")
+    parser.add_argument(
+        "--snapshot-steps",
+        type=int,
+        nargs="+",
+        help="Long-refinement trajectory snapshot iterations",
+    )
+    parser.add_argument(
+        "--initializations",
+        nargs="+",
+        choices=("planner", "expert_noise"),
+        help="Long-refinement starting trajectories; defaults to both",
+    )
+    parser.add_argument("--seed", type=int, help="Long-refinement reproducibility seed")
+    parser.add_argument("--gamma", type=float, help="Long-refinement update step factor")
     args = parser.parse_args(argv)
     if args.progress is not None:
         os.environ["SCORE_FUNCTION_PROGRESS"] = args.progress
@@ -59,8 +75,24 @@ def main(argv=None):
         parser.error(
             "--resume applies only to training; prepare/cache resume completed shards automatically"
         )
-    if args.command in ("evaluate", "evaluate-planner") and not args.checkpoint:
+    if (
+        args.command in ("evaluate", "evaluate-planner", "visualize-refinement")
+        and not args.checkpoint
+    ):
         parser.error("Evaluation requires --checkpoint score/best.pt")
+    diagnostic_options = (
+        args.steps,
+        args.snapshot_steps,
+        args.initializations,
+        args.seed,
+        args.gamma,
+    )
+    if args.command != "visualize-refinement" and any(
+        value is not None for value in diagnostic_options
+    ):
+        parser.error(
+            "--steps/--snapshot-steps/--initializations/--seed/--gamma require visualize-refinement"
+        )
     if args.command == "check-config":
         print(json.dumps(config, indent=2))
         return
@@ -76,7 +108,12 @@ def main(argv=None):
             f"output={config['output']}",
             flush=True,
         )
-    configure_runtime(config, require_cuda=args.command != "prepare")
+    evaluation = args.command in ("evaluate", "evaluate-planner", "visualize-refinement")
+    configure_runtime(
+        config,
+        require_cuda=args.command != "prepare"
+        and (not evaluation or str(config["runtime"]["device"]).startswith("cuda")),
+    )
     if args.command == "check-ddp":
         from score_function.tools.check_environment import check_ddp
 
@@ -104,6 +141,21 @@ def main(argv=None):
         from score_function.train import train
 
         train(config, resume=args.resume)
+    elif args.command == "visualize-refinement":
+        from score_function.evaluation.long_refinement import diagnose_refinement
+
+        diagnose_refinement(
+            config,
+            args.checkpoint,
+            split=args.split,
+            output=args.output,
+            max_samples=args.max_samples,
+            steps=args.steps,
+            snapshot_steps=args.snapshot_steps,
+            initializations=args.initializations,
+            seed=args.seed,
+            gamma=args.gamma,
+        )
     else:
         from score_function.evaluation.diagnostics import evaluate
         from score_function.evaluation.planner_evaluation import evaluate_planner

@@ -1,16 +1,74 @@
 {
-  "name": "sigma_temporal_neighbors_v1",
+  "name": "sigma_temporal_neighbors_aligned_v2",
   "experiments": [
-    {"id": "S02-L", "sigma": 0.02, "variant": "local"},
-    {"id": "S05-L", "sigma": 0.05, "variant": "local"},
-    {"id": "S10-L", "sigma": 0.10, "variant": "local"},
-    {"id": "S20-L", "sigma": 0.20, "variant": "local"},
-    {"id": "S05-W", "sigma": 0.05, "variant": "wide"},
-    {"id": "S10-W", "sigma": 0.10, "variant": "wide"},
-    {"id": "S05-G", "sigma": 0.05, "variant": "global"},
-    {"id": "S05-N", "sigma": 0.05, "variant": "neighbors"}
+    {
+      "id": "S02-L",
+      "sigma": 0.02,
+      "variant": "local"
+    },
+    {
+      "id": "S05-L",
+      "sigma": 0.05,
+      "variant": "local"
+    },
+    {
+      "id": "S10-L",
+      "sigma": 0.1,
+      "variant": "local"
+    },
+    {
+      "id": "S20-L",
+      "sigma": 0.2,
+      "variant": "local"
+    },
+    {
+      "id": "S05-W",
+      "sigma": 0.05,
+      "variant": "wide"
+    },
+    {
+      "id": "S10-W",
+      "sigma": 0.1,
+      "variant": "wide"
+    },
+    {
+      "id": "S05-G",
+      "sigma": 0.05,
+      "variant": "global"
+    },
+    {
+      "id": "S05-N",
+      "sigma": 0.05,
+      "variant": "neighbors"
+    }
   ],
-  "training": {"batch_size": 2048, "microbatch_size": 128, "num_workers": 2},
-  "runtime": {"memory_fraction": 0.5, "cpu_threads": 2},
-  "data": {"preprocess_workers": 16, "encoding_batch_size": 64, "neighbor_batch_size": 16}
+  "training": {
+    "batch_size": 2048,
+    "microbatch_size": 128,
+    "num_workers": 2,
+    "max_epochs": 500,
+    "minimum_epochs": 500,
+    "minimum_updates": 244000,
+    "lr_schedule": "constant_after_warmup",
+    "early_stopping": false,
+    "ema_warmup": false,
+    "warmup_epochs": 5,
+    "warmup_learning_rate": 5e-05,
+    "learning_rate": 0.0005,
+    "weight_decay": 0.01,
+    "data_augmentation": {
+      "enabled": true,
+      "probability": 0.5,
+      "encoding_batch_size": 64
+    }
+  },
+  "runtime": {
+    "memory_fraction": 0.5,
+    "cpu_threads": 2
+  },
+  "data": {
+    "preprocess_workers": 16,
+    "encoding_batch_size": 64,
+    "neighbor_batch_size": 16
+  }
 }
