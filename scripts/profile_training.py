@@ -27,6 +27,7 @@ import os
 import random
 import statistics
 import time
+from itertools import islice
 from pathlib import Path
 
 import numpy as np
@@ -43,6 +44,20 @@ from score_function.utils.planner_utils import planner_identity
 from score_function.utils.train_utils import atomic_write, file_hash, load_tensor, source_hashes
 
 epoch_module = importlib.import_module("score_function.train_epoch")
+
+
+class LimitedBatchSampler:
+    """Keep the original sample order, with a finite untimed prefetch tail."""
+
+    def __init__(self, sampler, count):
+        self.sampler = sampler
+        self.count = min(len(sampler), count)
+
+    def __iter__(self):
+        return islice(iter(self.sampler), self.count)
+
+    def __len__(self):
+        return self.count
 
 
 def synchronize(device):
@@ -147,7 +162,15 @@ def run_case(config, dataset, device, encoding_batch_size, warmup, steps, timing
     )
     if warmup + steps + timing_steps > sampler.updates:
         raise ValueError("The requested profile exceeds one epoch; reduce profile step counts")
-    loader = build_data_loader(dataset, cfg, batch_sampler=sampler)
+    accumulation = cfg["batch_size"] // world // cfg["microbatch_size"]
+    # Ending a short profile against a full-epoch sampler leaves workers still
+    # producing prefetched tensors when Python destroys the iterator. In some
+    # PyTorch builds those workers abort during teardown. Keep prefetch intact
+    # throughout measurement, then exhaust a small finite tail outside timing.
+    profile_batches = (warmup + steps + timing_steps) * accumulation
+    prefetch_tail = 2 * cfg["num_workers"]
+    limited_sampler = LimitedBatchSampler(sampler, profile_batches + prefetch_tail)
+    loader = build_data_loader(dataset, cfg, batch_sampler=limited_sampler)
     meter = Meter(device)
     batches = MeasuredBatches(iter(loader), meter)
     original_transfer = epoch_module.device_batch
@@ -167,7 +190,7 @@ def run_case(config, dataset, device, encoding_batch_size, warmup, steps, timing
         start_step=0,
         start_update=0,
         updates_per_epoch=sampler.updates,
-        accumulation=cfg["batch_size"] // world // cfg["microbatch_size"],
+        accumulation=accumulation,
         next_lr=cfg["learning_rate"],
         distributed_model=wrapped,
         batch_transform=lambda batch: meter.call("augmentation_encoding_s", provider, batch),
@@ -215,6 +238,11 @@ def run_case(config, dataset, device, encoding_batch_size, warmup, steps, timing
             else 0.0,
             "diagnostic_steps": detailed,
         }
+        # Reach the DataLoader's normal StopIteration shutdown, rather than
+        # abandoning prefetched multiprocessing work to iterator.__del__.
+        updates.close()
+        for _ in batches.iterator:
+            pass
     finally:
         epoch_module.device_batch = original_transfer
         updates.close()
@@ -320,6 +348,7 @@ def main():
                 "Throughput excludes startup, validation, checkpoint saving and normal training logging.",
                 "Stage times synchronize CUDA and are diagnostic only; DDP waits are included in score time.",
                 "Repeated scenes can warm filesystem caches; compare both baseline passes.",
+                "A finite prefetch tail is drained outside timing for normal worker shutdown.",
             ],
         }
         if ddp.rank() == 0:
