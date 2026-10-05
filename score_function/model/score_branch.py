@@ -251,9 +251,14 @@ class ScoreFunctionBranch(nn.Module):
         return tokens
 
 
-def build_model(config: dict, device: torch.device | str) -> ScoreFunctionBranch:
+def build_model(config: dict, device: torch.device | str) -> nn.Module:
     """Construct only the trainable branch; conditioning belongs to the adapter."""
     settings = dict(config["model"])
-    if settings.pop("architecture", None) != "temporal_score_function":
-        raise ValueError("Expected model.architecture='temporal_score_function'")
-    return ScoreFunctionBranch(**settings).to(device)
+    architecture = settings.pop("architecture", None)
+    if architecture == "temporal_score_function":
+        return ScoreFunctionBranch(**settings).to(device)
+    if architecture == "dit_score_function":
+        from score_function.model.dit_score_branch import DiTScoreFunctionBranch
+
+        return DiTScoreFunctionBranch(**settings).to(device)
+    raise ValueError(f"Unsupported model.architecture: {architecture!r}")

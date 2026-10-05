@@ -6,7 +6,7 @@ The model learns a fixed-noise-scale score from expert trajectories, conditioned
 
 ## Method
 
-The score network combines temporal residual convolutions, scene cross-attention, and route conditioning. Its normalized trajectory input and score output both have shape `[B, 80, 4]`, with trajectory coordinates `(x, y, cos(theta), sin(theta))`. Scores are derivatives with respect to these normalized coordinates.
+The default score network combines temporal residual convolutions, scene cross-attention, and route conditioning. A [DP-aligned temporal-token DiT](docs/dit_score.md) is also available for direct-score experiments. Both use normalized trajectory inputs and score outputs of shape `[B, 80, 4]`, with trajectory coordinates `(x, y, cos(theta), sin(theta))`. Scores are derivatives with respect to these normalized coordinates.
 
 Training uses fixed-scale denoising score matching:
 
@@ -27,7 +27,7 @@ $$
 
 The score network receives no diffusion timestep. Scene and route features remain fixed during refinement. Optional heading projection normalizes the heading vectors after each update.
 
-Two parameterizations share this same fixed-sigma DSM objective and fixed-step refinement:
+The temporal-convolution architecture supports two parameterizations sharing this same fixed-sigma DSM objective and fixed-step refinement; the DiT architecture currently supports direct scores:
 
 | `model.parameterization` | Score computation |
 |---|---|
@@ -108,6 +108,12 @@ python -m score_function check-config \
 
 The single quotes preserve the JSON double quotes required by `--set`. Keep a separate run directory for each parameterization.
 
+For DiT, use [configs/score_function_dit.json](configs/score_function_dit.json), or
+derive a configuration from the current direct-score run with
+`scripts/prepare_dit_config.py`. The generator retains the complete current
+training/data recipe and creates a separate run. See the [DiT guide](docs/dit_score.md)
+for official decoder alignment, deliberate differences, and launch commands.
+
 ## Training
 
 ### Train from an existing cache
@@ -128,7 +134,7 @@ CUDA_VISIBLE_DEVICES=0 python -u train_score_branch.py \
   --config /path/to/E05-L.json --root /path/to/workspace
 ```
 
-Both score and energy configurations use this same entry. `scripts/train.sh`
+Temporal score, energy and DiT configurations use this same entry. `scripts/train.sh`
 only starts training: it does not install dependencies, prepare data, rebuild
 caches, or run simulation. Pass `--gpus 0,1` for two processes; global batch must
 be divisible by `GPU count * microbatch_size`. A comma-separated mask alone does

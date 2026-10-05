@@ -2,7 +2,7 @@ name: CPU tests
 
 on:
   push:
-    branches: [main, codex/score-energy-parameterization]
+    branches: [main, codex/score-energy-parameterization, codex/dit-score-branch]
   pull_request:
 
 permissions:
@@ -15,7 +15,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        torch: ["2.0.1", "2.5.1"]
+        include:
+          - torch: "2.0.1"
+            torchvision: "0.15.2"
+          - torch: "2.5.1"
+            torchvision: "0.20.1"
     env:
       OMP_NUM_THREADS: "1"
       MKL_NUM_THREADS: "1"
@@ -29,7 +33,7 @@ jobs:
         run: |
           python -m pip install "torch==${{ matrix.torch }}" --index-url https://download.pytorch.org/whl/cpu
           python -m pip install "numpy<2" "matplotlib>=3.5,<4" "tqdm>=4.64,<5"
-      - name: Test score and energy, including two-rank Gloo
+      - name: Test temporal score, energy and DiT, including two-rank Gloo
         run: python -m unittest discover -s tests -v
       - name: Check out pinned official augmentation source
         uses: actions/checkout@v4
@@ -41,3 +45,11 @@ jobs:
         env:
           SCORE_FUNCTION_OFFICIAL_ROOT: ${{ github.workspace }}/.test-assets/Diffusion-Planner
         run: python -m unittest discover -s tests -p test_online_training.py -v
+      - name: Install official DiT parity dependencies
+        run: |
+          python -m pip install "torchvision==${{ matrix.torchvision }}" --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install "timm==1.0.10"
+      - name: Compare DiT outputs and gradients with official code
+        env:
+          SCORE_FUNCTION_OFFICIAL_ROOT: ${{ github.workspace }}/.test-assets/Diffusion-Planner
+        run: python -m unittest discover -s tests -p test_dit_score.py -v

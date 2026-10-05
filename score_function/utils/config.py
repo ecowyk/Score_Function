@@ -39,7 +39,7 @@ def load_config(path, root=None, overrides=()):
     config["paths"]["root"] = str(Path(root or config["paths"]["root"]).expanduser().resolve())
     model, cfg = config["model"], config["training"]
     if (
-        model["architecture"] != "temporal_score_function"
+        model["architecture"] not in ("temporal_score_function", "dit_score_function")
         or model["future_len"] != 80
         or model["input_dim"] != 4
         or model["context_dim"] != 192
@@ -52,9 +52,29 @@ def load_config(path, root=None, overrides=()):
         or not 0 <= model["dropout"] < 1
     ):
         raise ValueError("Invalid hidden width/heads/dropout")
-    for key in ("pre_dilations", "post_dilations"):
-        if not model[key] or any(not isinstance(x, int) or x < 1 for x in model[key]):
-            raise ValueError(f"Invalid model.{key}")
+    if model["architecture"] == "temporal_score_function":
+        for key in ("pre_dilations", "post_dilations"):
+            if not model[key] or any(not isinstance(x, int) or x < 1 for x in model[key]):
+                raise ValueError(f"Invalid model.{key}")
+    else:
+        if model["parameterization"] != "score":
+            raise ValueError("dit_score_function supports only parameterization='score'")
+        for key in ("depth", "preproj_hidden_dim"):
+            value = model.get(key)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError(f"model.{key} must be a positive integer")
+        ratio = model.get("mlp_ratio")
+        if (
+            not isinstance(ratio, (int, float))
+            or isinstance(ratio, bool)
+            or not math.isfinite(ratio)
+            or ratio <= 0
+            or int(model["hidden_dim"] * ratio) < 1
+        ):
+            raise ValueError("Invalid model.mlp_ratio")
+        for key in ("pre_dilations", "post_dilations", "temporal_attention", "neighbor_future"):
+            if key in model:
+                raise ValueError(f"model.{key} is not a dit_score_function setting")
     for key in ("temporal_attention", "neighbor_future"):
         if not isinstance(model.get(key, False), bool):
             raise ValueError(f"model.{key} must be boolean")
