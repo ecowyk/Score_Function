@@ -1,5 +1,6 @@
 """Queue safety and final-EMA export, with CPU checkpoints and mocked GPU queries."""
 
+import fcntl
 import importlib.util
 import json
 import shutil
@@ -24,7 +25,7 @@ SPEC.loader.exec_module(queue)
 
 
 class QueueTests(unittest.TestCase):
-    def fixture(self, directory):
+    def fixture(self, directory, world_size=4):
         root = Path(directory)
         code = root / "code"
         shutil.copytree(
@@ -42,7 +43,7 @@ class QueueTests(unittest.TestCase):
         score = root / "run/score"
         score.mkdir(parents=True)
         sources = queue.sources(code)
-        signature = training_signature(config, "test_cache_sha256", 4)
+        signature = training_signature(config, "test_cache_sha256", world_size)
         budget = {"planned_epochs": 2, "planned_optimizer_updates": 4}
         state = dict(
             schema_version=1,
@@ -54,7 +55,7 @@ class QueueTests(unittest.TestCase):
             epoch=2,
             step=4,
             cursor=0,
-            ranks=[{}] * 4,
+            ranks=[{}] * world_size,
             finished=True,
             termination="epoch_budget_exhausted",
             training_budget=budget,
@@ -82,7 +83,7 @@ class QueueTests(unittest.TestCase):
         queue.write(
             score / "model_info.json",
             dict(
-                world_size=4,
+                world_size=world_size,
                 global_batch=config["training"]["batch_size"],
                 microbatch_per_rank=config["training"]["microbatch_size"],
             ),
@@ -93,8 +94,8 @@ class QueueTests(unittest.TestCase):
             config=str(config_path),
             output=str(root / "run"),
             resume=False,
-            world_size=4,
-            gpus=[0, 1, 2, 3],
+            world_size=world_size,
+            gpus=list(range(world_size)),
             target_epochs=2,
             target_updates=4,
             sources=sources,
@@ -104,6 +105,16 @@ class QueueTests(unittest.TestCase):
             **{str(code / "score_function" / name): sha for name, sha in sources.items()},
         }
         return job, dict(jobs=[job], files=files), state
+
+    def test_eight_rank_plan_checkpoint_and_final_ema(self):
+        with tempfile.TemporaryDirectory() as directory:
+            job, plan, _ = self.fixture(directory, world_size=8)
+            queue.verify_plan(plan)
+            self.assertIn("--nproc_per_node=8", queue.command_for(job, True))
+            self.assertEqual(queue.inspect_checkpoint(job, "eight_rank_plan")["step"], 4)
+            result = queue.inspect_checkpoint(job, "eight_rank_plan", final=True)
+            final = torch.load(result["final_ema"], weights_only=False)
+            self.assertEqual(final["export_provenance"]["model_info"]["world_size"], 8)
 
     def test_three_fixed_sigma_jobs_are_valid_without_multi_sigma(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -207,6 +218,72 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(saved["jobs"]["unit"]["exit_code"], 7)
             self.assertTrue((root / "logs/unit.launcher.log").is_file())
             self.assertTrue((Path(job["output"]) / "score/last.pt").is_file())
+
+    def test_superseded_queue_lock_blocks_new_queue_without_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, plan, _ = self.fixture(directory)
+            root = Path(directory)
+            old_queue = root / "old_four_gpu_queue"
+            old_queue.mkdir()
+            plan["supersedes_queue"] = str(old_queue)
+            queue.write(root / "plan.json", plan)
+            args = SimpleNamespace(
+                queue_dir=root, poll_seconds=1, gpu_memory_mib=256, gpu_util_percent=5
+            )
+            with (old_queue / "queue.lock").open("a") as held:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with patch.object(queue.subprocess, "Popen") as launch:
+                    with self.assertRaisesRegex(RuntimeError, "4-GPU queue is still active"):
+                        queue.run(args)
+                    launch.assert_not_called()
+            self.assertFalse((root / "queue_identity.json").exists())
+
+    def test_new_runner_holds_and_passes_both_queue_locks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            job, plan, _ = self.fixture(directory)
+            root = Path(directory)
+            old_queue = root / "old_four_gpu_queue"
+            old_queue.mkdir()
+            plan["supersedes_queue"] = str(old_queue)
+            queue.write(root / "plan.json", plan)
+            queue.write(Path(job["output"]) / "score/status.json", {"state": "failed"})
+            args = SimpleNamespace(
+                queue_dir=root, poll_seconds=1, gpu_memory_mib=256, gpu_util_percent=5
+            )
+
+            def launch(*args, **kwargs):
+                self.assertEqual(len(kwargs["pass_fds"]), 2)
+                with (old_queue / "queue.lock").open("a") as attempt:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(attempt, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return SimpleNamespace(pid=123, returncode=7, poll=lambda: 7)
+
+            with (
+                patch.object(queue, "gpu_busy", return_value=[]),
+                patch.object(queue, "inspect_checkpoint", return_value={"step": 2, "epoch": 1}),
+                patch.object(queue.subprocess, "Popen", side_effect=launch),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "code 7"):
+                    queue.run(args)
+            # Exiting the runner releases both descriptors when no real child exists.
+            with (old_queue / "queue.lock").open("a") as attempt:
+                fcntl.flock(attempt, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_missing_superseded_queue_is_not_created(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, plan, _ = self.fixture(directory)
+            root = Path(directory)
+            old_queue = root / "missing_four_gpu_queue"
+            plan["supersedes_queue"] = str(old_queue)
+            queue.write(root / "plan.json", plan)
+            args = SimpleNamespace(
+                queue_dir=root, poll_seconds=1, gpu_memory_mib=256, gpu_util_percent=5
+            )
+            with patch.object(
+                queue, "inspect_checkpoint", return_value={"final_ema": "fixture.pt"}
+            ):
+                self.assertEqual(queue.run(args), 0)
+            self.assertFalse(old_queue.exists())
 
     def test_status_displays_target_and_eta(self):
         with tempfile.TemporaryDirectory() as directory:
