@@ -9,9 +9,13 @@ original run is read-only; only a previously nonexistent output is created.
 import argparse
 import copy
 import json
+import random
 import shutil
 import time
 from pathlib import Path
+
+import numpy as np
+import torch
 
 from score_function.utils.config import load_config
 from score_function.utils.planner_utils import planner_identity
@@ -23,6 +27,7 @@ from score_function.utils.train_utils import (
     read_json,
     resolve_path,
     source_hashes,
+    stable_seed,
     training_signature,
 )
 from score_function.utils.training_budget import training_budget
@@ -71,8 +76,34 @@ def _cache_identity(config, provenance, state):
     return provenance["cache_sha256"]
 
 
+def _expanded_rank_states(state, config, target_world):
+    """Retain old RNG streams and seed new ranks without touching global RNGs."""
+    old_world = len(state["ranks"])
+    uses_cuda = [rank["rng"]["cuda"] is not None for rank in state["ranks"]]
+    _require(len(set(uses_cuda)) == 1, "Source ranks disagree about CUDA RNG state")
+    if target_world > old_world and uses_cuda[0]:
+        _require(torch.cuda.is_available(),
+                 "Expanding CUDA rank RNGs requires an available CUDA device; expose one GPU "
+                 "to this preparation subprocess with CUDA_VISIBLE_DEVICES")
+    ranks = list(state["ranks"])
+    seeds = {}
+    for rank in range(old_world, target_world):
+        seed = stable_seed(config["training"]["seed"], "world_size_expansion",
+                           state["epoch"], rank)
+        rng = {
+            "torch": torch.Generator(device="cpu").manual_seed(seed).get_state(),
+            "cuda": (torch.Generator(device="cuda:0").manual_seed(seed).get_state()
+                     if uses_cuda[0] else None),
+            "python": random.Random(seed).getstate(),
+            "numpy": np.random.RandomState(seed % (2 ** 32)).get_state(),
+        }
+        ranks.append({"rng": rng, "epoch_loss": 0.0, "epoch_count": 0})
+        seeds[str(rank)] = {"seed": seed, "numpy_seed": seed % (2 ** 32)}
+    return ranks, seeds
+
+
 def fork_checkpoint(source_score, config_path, output, epochs_extra=100, *,
-                    expected_world_size=4):
+                    expected_world_size=4, target_world_size=None):
     """Prepare a complete-state continuation; world-size override is for CPU tests."""
     source = Path(source_score).resolve()
     output = Path(output).resolve()
@@ -108,6 +139,10 @@ def fork_checkpoint(source_score, config_path, output, epochs_extra=100, *,
     world = info["world_size"]
     _require(world == expected_world_size and len(state["ranks"]) == world,
              "Original world size/rank states differ from the required continuation")
+    target_world = world if target_world_size is None else target_world_size
+    _require(isinstance(target_world, int) and not isinstance(target_world, bool)
+             and target_world in (world, 2 * world),
+             "Target world size must retain the source size or expand it exactly twofold")
     cfg = old["training"]
     _require(info["global_batch"] == cfg["batch_size"]
              and info["microbatch_per_rank"] == cfg["microbatch_size"]
@@ -115,6 +150,8 @@ def fork_checkpoint(source_score, config_path, output, epochs_extra=100, *,
              and info["gradient_accumulation"]
              == cfg["batch_size"] // world // cfg["microbatch_size"],
              "Original batch/world-size/accumulation metadata disagree")
+    _require(cfg["batch_size"] % (target_world * cfg["microbatch_size"]) == 0,
+             "Global batch must divide target world size and unchanged microbatch exactly")
     signature = training_signature(old, cache_hash, world)
     _require(signature == state["signature"] == provenance["signature"],
              "Source training signature does not match its config/data/world size")
@@ -156,15 +193,27 @@ def fork_checkpoint(source_score, config_path, output, epochs_extra=100, *,
     _require(budget["planned_epochs"] == target_epochs,
              "New budget does not add exactly epochs_extra epochs")
     fork = dict(state)
-    new_signature = training_signature(new, cache_hash, world)
+    new_signature = training_signature(new, cache_hash, target_world)
+    ranks, new_rank_seeds = _expanded_rank_states(state, new, target_world)
     fork.update(config=new, signature=new_signature, training_budget=budget,
-                finished=False, termination=None)
+                finished=False, termination=None, ranks=ranks)
+    migration = dict(
+        source_world_size=world, target_world_size=target_world,
+        preserved_ranks=list(range(world)), new_rank_seeds=new_rank_seeds,
+        exact_original_world_size_continuation=(target_world == world),
+        note=("Original rank RNG streams retained."
+              if target_world == world else
+              "World size expanded at a completed epoch boundary. Optimizer and model state "
+              "are retained; rank sample partitioning and new RNG streams change, so this "
+              "is not a bitwise continuation of the original world size."),
+    )
     metadata = dict(
         schema_version=1, kind="full_state_epoch_budget_continuation",
         created_unix=time.time(), source_score=str(source), output_score=str(output),
         source_files_sha256=original_hashes, config_file=str(config_path),
         config_file_sha256=config_file_hash, source_signature=signature,
-        signature=new_signature, world_size=world, epochs_extra=epochs_extra,
+        signature=new_signature, world_size=target_world, epochs_extra=epochs_extra,
+        world_size_migration=migration,
         start_epoch=state["epoch"], start_step=state["step"],
         original_training_budget=old_budget, training_budget=budget,
         allowed_config_changes={
@@ -188,8 +237,13 @@ def fork_checkpoint(source_score, config_path, output, epochs_extra=100, *,
             _require(file_hash(output / name) == original_hashes[name],
                      f"Inherited artifact changed while copying: {name}")
         atomic_write(output / "config.json", new)
-        atomic_write(output / "model_info.json", {**info, "training_budget": budget})
-        atomic_write(output / "provenance.json", {**provenance, "signature": new_signature})
+        atomic_write(output / "model_info.json", {
+            **info, "training_budget": budget, "world_size": target_world,
+            "gradient_accumulation": cfg["batch_size"] // target_world // cfg["microbatch_size"],
+        })
+        atomic_write(output / "provenance.json", {
+            **provenance, "signature": new_signature, "world_size_migration": migration,
+        })
         atomic_write(output / "status.json", {
             "state": "prepared", "phase": "continuation", "epoch": state["epoch"],
             "step": state["step"], "sample_presentations": state["sample_presentations"],
@@ -212,8 +266,10 @@ def main():
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--epochs-extra", type=int, default=100)
+    parser.add_argument("--target-world-size", type=int, default=None)
     args = parser.parse_args()
-    metadata = fork_checkpoint(args.source_score, args.config, args.output, args.epochs_extra)
+    metadata = fork_checkpoint(args.source_score, args.config, args.output, args.epochs_extra,
+                               target_world_size=args.target_world_size)
     print(json.dumps(metadata, ensure_ascii=False, allow_nan=False), flush=True)
 
 
