@@ -160,14 +160,42 @@ def load_log(path):
     return log
 
 
-def find_log(run, token):
-    matches = sorted((run / "simulation").rglob(f"{token}.msgpack.xz"))
-    matches += sorted((run / "simulation").rglob(f"{token}.pkl.xz"))
+def find_log(run, token, log_root=None):
+    # nuPlan's default SimulationLogCallback writes simulation_log/, whereas
+    # the legacy scene-JSON serializer uses simulation/. Honour a configured
+    # log directory, and discover existing logs anywhere within this exact run.
+    # Never fall back to another experiment or silently choose duplicate logs.
+    roots = [Path(run)]
+    if log_root is not None:
+        roots.append(Path(log_root))
+    matches = sorted(
+        {
+            path.resolve()
+            for root in roots
+            for suffix in ("msgpack.xz", "pkl.xz")
+            for path in root.rglob(f"{token}.{suffix}")
+            if path.is_file()
+        }
+    )
     if len(matches) != 1:
         raise ValueError(
             f"Expected one saved simulation for {token}; found {len(matches)} in {run}"
         )
     return matches[0]
+
+
+def ensure_manifest(output, provenance):
+    manifest_path = output / "capture_manifest.json"
+    if manifest_path.exists() and read(manifest_path) != provenance:
+        captured = list((output / "captures").rglob("payload.json"))
+        captured += list((output / "captures").rglob("inputs.npz"))
+        if captured:
+            raise ValueError("Output contains a different capture protocol; choose a new --output")
+        print(
+            "Updating metadata in empty capture directory after the earlier failed attempt.",
+            flush=True,
+        )
+    write(manifest_path, provenance)
 
 
 def make_history(scenario, samples, index, duration):
@@ -412,10 +440,7 @@ def capture(args):
         K=list(KS),
         replay_tolerance_m=args.replay_tolerance_m,
     )
-    manifest_path = output / "capture_manifest.json"
-    if manifest_path.exists() and read(manifest_path) != provenance:
-        raise ValueError("Output contains a different capture protocol; choose a new --output")
-    write(manifest_path, provenance)
+    ensure_manifest(output, provenance)
     planner = ScoreFunctionPlanner(
         score_config=str(config_path),
         score_checkpoint=str(checkpoint),
@@ -428,8 +453,10 @@ def capture(args):
         past_trajectory_sampling=TrajectorySampling(num_poses=20, time_horizon=2.0),
         future_trajectory_sampling=TrajectorySampling(num_poses=80, time_horizon=8.0),
     )
+    callback = cfg.get("callback", {}).get("simulation_log_callback", {})
+    log_root = run / str(callback.get("simulation_log_dir", "simulation_log"))
     for case in selected_cases(args.cohort):
-        log_path = find_log(run, case[1])
+        log_path = find_log(run, case[1], log_root=log_root)
         log_sha = digest(log_path)
         print(f"Loading {case[0]} {case[1]}: {log_path}", flush=True)
         log = load_log(log_path)
