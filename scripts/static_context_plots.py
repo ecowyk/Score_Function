@@ -41,6 +41,57 @@ SCENARIO_ZH = {
     "traversing_pickup_dropoff": "通过接送区域",
     "waiting_for_pedestrian_to_cross": "等待行人通过",
 }
+CASE_CATEGORIES = {"I": "改善候选", "W": "退化候选", "K": "步数敏感候选", "C": "对照"}
+SCORE_TIE_TOLERANCE = 1e-6  # points on the displayed 0-100 scale
+
+
+def case_category(case_id):
+    """Selection cohort, never a verdict on the K displayed on this page."""
+    match = re.fullmatch(r"([IWKC])[0-9]+", str(case_id))
+    return CASE_CATEGORIES[match.group(1)] if match else "诊断场景"
+
+
+def _score_band(payload, k):
+    """Validate and format whole-scenario closed-loop scores for this exact K."""
+    missing = {
+        "text": "闭环得分未加载",
+        "verdict": "missing",
+        "delta": None,
+        "color": "#56616b",
+        "background": "#f0f2f4",
+    }
+    scores = payload.get("closed_loop_scores")
+    if not scores:
+        return missing
+    if scores.get("scope") != "scenario_closed_loop" or scores.get("scale") != 100:
+        raise ValueError("Closed-loop labels require scenario_closed_loop scores on scale=100")
+    baseline = scores.get("baseline", {}).get("score")
+    current = scores.get("by_k", {}).get(str(k), {}).get("score")
+    if baseline is None or current is None:
+        return missing
+    baseline, current = float(baseline), float(current)
+    if not np.isfinite([baseline, current]).all() or not (
+        -1e-9 <= baseline <= 100 + 1e-9 and -1e-9 <= current <= 100 + 1e-9
+    ):
+        raise ValueError("Closed-loop scores must be finite points in [0, 100]")
+    delta = current - baseline
+    if abs(delta) <= SCORE_TIE_TOLERANCE:
+        verdict, change, color, background = "tie", "持平 0.00 分", "#526270", "#eff2f5"
+    else:
+        improved = delta > 0
+        verdict = "improved" if improved else "worsened"
+        word = "改善" if improved else "退步"
+        change = f"{word}（<0.01 分）" if abs(delta) < 0.01 else f"{word} {delta:+.2f} 分"
+        color, background = ("#176b47", "#edf7f1") if improved else ("#a63a32", "#fcefed")
+    return {
+        "text": f"场景闭环得分：DP {baseline:.2f} → G K={k} {current:.2f}  |  {change}",
+        "verdict": verdict,
+        "delta": delta,
+        "baseline": baseline,
+        "score": current,
+        "color": color,
+        "background": background,
+    }
 
 
 def _xy(values):
@@ -368,12 +419,12 @@ def render_case(
     # A wide straight road gets two full-width horizontal strips; turning and
     # stationary scenes get two large, nearly square panels. Bounds expand to
     # the actual panel dimensions instead of distorting the x/y scale.
-    width, height = 15.5, 9.2
+    width, height = 15.5, 10.2
     stacked = (limits[1] - limits[0]) / (limits[3] - limits[2]) > 2.3
     if stacked:
-        positions = [(0.08, 0.535, 0.88, 0.29), (0.08, 0.19, 0.88, 0.24)]
+        positions = [(0.08, 0.505, 0.88, 0.255), (0.08, 0.19, 0.88, 0.225)]
     else:
-        positions = [(0.065, 0.225, 0.41, 0.575), (0.56, 0.225, 0.41, 0.575)]
+        positions = [(0.065, 0.205, 0.41, 0.54), (0.56, 0.205, 0.41, 0.54)]
     limits = _fit_limits(limits, positions[0][2] * width / (positions[0][3] * height))
     zoom = _fit_limits(zoom, positions[1][2] * width / (positions[1][3] * height))
     # Keep the entire enlarged window visible as a rectangle in the overview,
@@ -398,6 +449,8 @@ def render_case(
     if include_curves:
         png_paths.append(output / (stem + "_补充曲线.png"))
     scenario = SCENARIO_ZH.get(payload.get("scenario_type"), "驾驶场景")
+    category = case_category(payload.get("case_id", ""))
+    bands = {k: _score_band(payload, k) for k in requested}
     meta = payload.get("metadata", {})
     anchor = meta.get("anchor", "DP_K0")
     has_map = bool(payload.get("map_polygons") or payload.get("map_lines"))
@@ -445,26 +498,39 @@ def render_case(
                 fig = plt.figure(figsize=(width, height))
                 try:
                     fig.suptitle(
-                        f"{payload.get('case_id', '')} · {scenario}  |  推动 {k} 次（K={k}）",
+                        f"{payload.get('case_id', '')}（{category}） · {scenario}  |  推动 {k} 次（K={k}）",
                         y=0.968,
                         fontsize=20,
                         fontweight="normal",
                     )
                     fig.text(
                         0.5,
-                        0.915,
-                        "灰虚线：原始 DP    蓝实线：推动后",
+                        0.908,
+                        bands[k]["text"],
                         ha="center",
-                        fontsize=14,
-                        color="#24394c",
+                        fontsize=15,
+                        color=bands[k]["color"],
+                        bbox={
+                            "boxstyle": "round,pad=0.5",
+                            "facecolor": bands[k]["background"],
+                            "edgecolor": "none",
+                        },
                     )
                     fig.text(
                         0.5,
-                        0.878,
-                        f"{cadence}；K 为推动次数。同一帧各 K 页面使用同一输入、同一比例。",
+                        0.866,
+                        "分组仅是选样标签，编号不代表排名；上方为整段场景得分，并非当前帧得分。",
                         ha="center",
                         fontsize=11,
                         color="#64717c",
+                    )
+                    fig.text(
+                        0.5,
+                        0.827,
+                        f"灰虚线：原始 DP    蓝实线：推动后    |    {cadence}",
+                        ha="center",
+                        fontsize=13,
+                        color="#24394c",
                     )
                     for index, (position, bounds) in enumerate(zip(positions, (limits, zoom))):
                         ax = fig.add_axes(position)
@@ -535,7 +601,7 @@ def render_case(
                     fig.text(
                         0.5,
                         0.053,
-                        "同一输入下的轨迹推动；非各组闭环实驶轨迹。局部窗口按位置变化选择，不代表事故时刻。",
+                        "K 为推动次数。同一帧各 K 使用同一输入；非各组闭环实驶轨迹。局部窗口不代表事故时刻。",
                         ha="center",
                         fontsize=10.5,
                         color="#53616c",
@@ -582,6 +648,7 @@ def render_case(
         "limits": list(limits),
         "zoom_limits": list(zoom),
         "zoom_index": peak,
+        "closed_loop_score_bands": {str(k): band for k, band in bands.items()},
     }
 
 
