@@ -11,7 +11,14 @@ import test_training_pipeline as pipeline
 import torch
 
 from score_function.train import train
-from score_function.utils.train_utils import atomic_write, file_hash, load_tensor, read_json
+from score_function.utils.train_utils import (
+    atomic_write,
+    file_hash,
+    load_tensor,
+    read_json,
+    stable_seed,
+    training_signature,
+)
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/fork_g_continuation.py"
 SPEC = importlib.util.spec_from_file_location("fork_g_continuation", SCRIPT)
@@ -145,3 +152,65 @@ def test_reference_snapshot_can_keep_original_output_in_its_config(completed, tm
     metadata = helper.fork_checkpoint(reference, path, output, 1, expected_world_size=1)
     assert metadata["source_score"] == str(reference)
     assert read_json(output / "status.json")["state"] == "prepared"
+
+
+def test_twofold_expansion_preserves_optimizer_and_old_rng_and_seeds_new_rank(completed):
+    source, path, output, new = completed
+    original = load_tensor(source / "last.pt")
+    global_rng = torch.get_rng_state().clone()
+    metadata = helper.fork_checkpoint(
+        source, path, output, 1, expected_world_size=1, target_world_size=2
+    )
+    expanded = load_tensor(output / "last.pt")
+    for key in original.keys() - {
+        "config", "signature", "training_budget", "finished", "termination", "ranks",
+    }:
+        assert_identical(original[key], expanded[key])
+    assert len(expanded["ranks"]) == 2
+    assert_identical(original["ranks"][0], expanded["ranks"][0])
+    added = expanded["ranks"][1]
+    assert added["epoch_loss"] == 0 and added["epoch_count"] == 0
+    assert added["rng"]["cuda"] is None
+    assert not torch.equal(added["rng"]["torch"], original["ranks"][0]["rng"]["torch"])
+    expected_seed = stable_seed(new["training"]["seed"], "world_size_expansion", 2, 1)
+    assert torch.equal(
+        added["rng"]["torch"], torch.Generator().manual_seed(expected_seed).get_state()
+    )
+    assert_identical(
+        added["rng"]["numpy"], np.random.RandomState(expected_seed % (2 ** 32)).get_state()
+    )
+    assert torch.equal(global_rng, torch.get_rng_state())
+    migration = metadata["world_size_migration"]
+    assert migration["source_world_size"] == 1 and migration["target_world_size"] == 2
+    assert migration["preserved_ranks"] == [0]
+    assert migration["new_rank_seeds"]["1"]["seed"] == expected_seed
+    assert migration["exact_original_world_size_continuation"] is False
+    info = read_json(output / "model_info.json")
+    assert info["world_size"] == 2 and info["gradient_accumulation"] == 2
+    assert info["global_batch"] == 4 and info["microbatch_per_rank"] == 1
+    provenance = read_json(output / "provenance.json")
+    assert provenance["world_size_migration"] == migration
+    assert expanded["signature"] == training_signature(new, provenance["cache_sha256"], 2)
+    assert original["ranks"] and len(load_tensor(source / "last.pt")["ranks"]) == 1
+
+
+def test_cuda_rank_expansion_requires_cuda_for_new_generator_states(completed, monkeypatch):
+    source, path, output, _ = completed
+    state = load_tensor(source / "last.pt")
+    state["ranks"][0]["rng"]["cuda"] = torch.zeros(16, dtype=torch.uint8)
+    atomic_write(source / "last.pt", state, tensor=True)
+    monkeypatch.setattr(helper.torch.cuda, "is_available", lambda: False)
+    with pytest.raises(ValueError, match="requires an available CUDA"):
+        helper.fork_checkpoint(
+            source, path, output, 1, expected_world_size=1, target_world_size=2
+        )
+    assert not output.exists()
+
+
+def test_world_size_change_can_only_double_at_epoch_boundary(completed):
+    source, path, output, _ = completed
+    with pytest.raises(ValueError, match="exactly twofold"):
+        helper.fork_checkpoint(
+            source, path, output, 1, expected_world_size=1, target_world_size=3
+        )
+    assert not output.exists()
