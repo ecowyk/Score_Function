@@ -14,7 +14,10 @@ PRIORITY = ("I01", "W01", "K01", "K02", "K04", "W04")
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
-    parser.add_argument("--output", type=Path, help="Default: SOURCE/report_cn_v2")
+    parser.add_argument("--output", type=Path, help="Default: SOURCE/report_cn_v3_scores")
+    parser.add_argument(
+        "--suite", type=Path, help="Frozen closed-loop suite; default from capture metadata"
+    )
     parser.add_argument("--cases", nargs="+", default=list(PRIORITY), help="Case IDs or all")
     parser.add_argument("--frames", nargs="+", type=int, help="Optional selected history indices")
     parser.add_argument("--ks", nargs="+", type=int, default=[20, 50, 200])
@@ -28,6 +31,7 @@ def main():
     os.environ["MPLBACKEND"] = "Agg"
     from matplotlib.backends.backend_pdf import PdfPages
     from static_context_plots import render_case
+    from static_context_scores import ScenarioScores
 
     root = args.source.resolve() / "captures"
     cases = (
@@ -53,7 +57,24 @@ def main():
     ks = tuple(sorted(set(args.ks)))
     if not ks or any(k <= 0 for k in ks):
         parser.error("--ks must contain positive refinement counts")
-    output = (args.output or args.source / "report_cn_v2").resolve()
+    payloads = [(path, json.loads(path.read_text())) for path in paths]
+    suite_path = args.suite or payloads[0][1].get("metadata", {}).get("suite")
+    scores = ScenarioScores(suite_path=suite_path)
+    score_index = {}
+    # Match every scene and K before creating a report. Missing results must
+    # never become zero scores or be substituted with the global average.
+    for path, payload in payloads:
+        absent = [k for k in ks if str(k) not in payload["trajectories"]]
+        if absent:
+            raise ValueError(f"{path} has no captured K={absent}")
+        payload["closed_loop_scores"] = scores.for_payload(payload, ks)
+        case = payload["case_id"]
+        if case not in score_index:
+            bundle = payload["closed_loop_scores"]
+            score_index[case] = bundle
+            values = " / ".join(f"K{k}={bundle['by_k'][str(k)]['score']:.2f}" for k in ks)
+            print(f"{case}: DP={bundle['baseline']['score']:.2f} / {values}", flush=True)
+    output = (args.output or args.source / "report_cn_v3_scores").resolve()
     output.mkdir(parents=True, exist_ok=True)
     report = output / "trajectory_report_cn.pdf"
     temporary = output / f"trajectory_report_cn.tmp.{os.getpid()}.pdf"
@@ -63,13 +84,7 @@ def main():
         with PdfPages(
             temporary, metadata={"Title": "S05-G 最终模型：轨迹推动", "Author": "Score Function"}
         ) as pdf:
-            for number, path in enumerate(paths, 1):
-                payload = json.loads(path.read_text())
-                absent = [k for k in ks if str(k) not in payload["trajectories"]]
-                if absent:
-                    raise ValueError(
-                        f"{path} has no captured K={absent}; do not rerun inference for layout changes"
-                    )
+            for number, (path, payload) in enumerate(payloads, 1):
                 case = payload["case_id"]
                 frame = int(payload["frame_index"])
                 folder = output / "figures" / case / f"frame_{frame:04d}"
@@ -89,6 +104,9 @@ def main():
         raise
     (output / "index.json").write_text(
         json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (output / "scores_used.json").write_text(
+        json.dumps(score_index, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print(
         f"完成：{len(paths)} 帧\n合并 PDF：{report}\n单页 PNG / 分帧 PDF：{output / 'figures'}",
