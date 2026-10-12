@@ -115,7 +115,7 @@ def main():
     parser.add_argument(
         "--root",
         type=Path,
-        default=Path("/home/data/wyk/outputs/score_aligned_1004/G_sigma_1012_v1/runs"),
+        default=Path("/home/data/wyk/outputs/score_aligned_1004/G_sigma_1012_8gpu_v1/runs"),
     )
     parser.add_argument("--names", nargs="+", default=["S05-G_plus100", "S10-G", "S025-G"])
     parser.add_argument("--interval", type=float, default=2)
@@ -168,3 +168,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
