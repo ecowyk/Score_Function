@@ -5,9 +5,10 @@ are in points; changed submetrics are raw 0..1, ordered DP/G20/G50/G200.
 These are diagnostic candidates, not a representative evaluation subset.
 """
 
-from pathlib import Path
-from collections import Counter
 import sys
+from collections import Counter
+from pathlib import Path
+
 import pandas as pd
 
 path = (
