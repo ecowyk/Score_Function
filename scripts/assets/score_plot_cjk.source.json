@@ -4,6 +4,6 @@
   "font_family": "Score Plot CJK",
   "modification": "Noto Sans SC static weight 400, report glyph subset, renamed family; hints removed",
   "license": "SIL Open Font License 1.1; see score_plot_cjk.OFL.txt",
-  "subset_sha256": "2f7ed0d1a541fff3a98e6a4956a1f5fba66e5328d04bb73d17bae43ebbf9fb3f",
-  "glyph_character_count": 302
+  "subset_sha256": "eecb9f387118f43ce0c5476f0f6d39ceeb4b00e6ace9bf9f34afb1c906f28a88",
+  "glyph_character_count": 337
 }
