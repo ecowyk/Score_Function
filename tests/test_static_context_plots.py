@@ -83,6 +83,9 @@ class StaticContextPlotsTest(unittest.TestCase):
             )
             self.assertEqual(PLOTS._trajectories(fixture())[0].shape, (80, 2))
             for figure, k in zip(shared.pages, (20, 50, 200)):
+                page_text = "\n".join(text.get_text() for text in figure.texts)
+                self.assertIn("闭环得分未加载", page_text)
+                self.assertNotIn("DP 0.00", page_text)
                 paths = [
                     line
                     for ax in figure.axes
@@ -104,6 +107,95 @@ class StaticContextPlotsTest(unittest.TestCase):
                     self.assertLessEqual(line.get_linewidth(), 1.0)
                     self.assertLessEqual(line.get_markersize(), 1.5)
                     self.assertEqual(line.axes.get_aspect(), 1.0)
+
+    def test_case_groups_are_selection_labels_and_do_not_decide_score_verdicts(self):
+        for case, expected in (
+            ("I01", "改善候选"),
+            ("W04", "退化候选"),
+            ("K02", "步数敏感候选"),
+            ("C03", "对照"),
+            ("QA_LONG", "诊断场景"),
+        ):
+            self.assertEqual(PLOTS.case_category(case), expected)
+        payload = {
+            "case_id": "I01",
+            "closed_loop_scores": {
+                "scope": "scenario_closed_loop",
+                "scale": 100,
+                "baseline": {"score": 100.0},
+                "by_k": {"50": {"score": 0.0}},
+            },
+        }
+        band = PLOTS._score_band(payload, 50)
+        self.assertEqual(band["verdict"], "worsened")
+        self.assertEqual(band["delta"], -100.0)
+        self.assertIn("退步 -100.00 分", band["text"])
+
+    def test_score_rounding_does_not_hide_small_changes_or_invent_missing_values(self):
+        payload = {
+            "closed_loop_scores": {
+                "scope": "scenario_closed_loop",
+                "scale": 100,
+                "baseline": {"score": 76.99},
+                "by_k": {},
+            }
+        }
+        for delta, verdict, word in (
+            (0.000004, "improved", "改善"),
+            (-0.000004, "worsened", "退步"),
+            (0.0000004, "tie", "持平"),
+        ):
+            payload["closed_loop_scores"]["by_k"]["20"] = {"score": 76.99 + delta}
+            band = PLOTS._score_band(payload, 20)
+            self.assertEqual(band["verdict"], verdict)
+            self.assertIn(word, band["text"])
+            if verdict != "tie":
+                self.assertIn("<0.01 分", band["text"])
+                self.assertNotIn("+0.00", band["text"])
+                self.assertNotIn("-0.00", band["text"])
+        self.assertEqual(PLOTS._score_band(payload, 50)["verdict"], "missing")
+        self.assertEqual(PLOTS._score_band({}, 20)["text"], "闭环得分未加载")
+        for score in (float("nan"), float("inf"), -1, 101):
+            payload["closed_loop_scores"]["by_k"]["20"] = {"score": score}
+            with self.assertRaises(ValueError):
+                PLOTS._score_band(payload, 20)
+        payload["closed_loop_scores"]["by_k"]["20"] = {"score": 77}
+        payload["closed_loop_scores"]["scale"] = 1
+        with self.assertRaisesRegex(ValueError, "scale=100"):
+            PLOTS._score_band(payload, 20)
+
+    def test_rendered_pages_show_the_corresponding_k_whole_scene_score(self):
+        class SharedPages:
+            def __init__(self):
+                self.pages = []
+
+            def savefig(self, figure):
+                self.pages.append(figure)
+
+        payload = fixture()
+        payload["case_id"] = "K01"
+        payload["closed_loop_scores"] = {
+            "scope": "scenario_closed_loop",
+            "scale": 100,
+            "baseline": {"score": 99.89},
+            "by_k": {"20": {"score": 100.0}, "50": {"score": 0.0}, "200": {"score": 98.62}},
+        }
+        expected = (
+            "G K=20 100.00  |  改善 +0.11 分",
+            "G K=50 0.00  |  退步 -99.89 分",
+            "G K=200 98.62  |  退步 -1.27 分",
+        )
+        shared = SharedPages()
+        with tempfile.TemporaryDirectory() as tmp:
+            PLOTS.render_case(payload, tmp, shared_pdf=shared)
+        for figure, score_text in zip(shared.pages, expected):
+            page_text = "\n".join(text.get_text() for text in figure.texts)
+            self.assertIn("K01（步数敏感候选）", page_text)
+            self.assertIn("DP 99.89", page_text)
+            self.assertIn(score_text, page_text)
+            self.assertIn("整段场景得分，并非当前帧得分", page_text)
+            self.assertIn("编号不代表排名", page_text)
+            self.assertNotIn("闭环得分未加载", page_text)
 
     def test_limits_keep_long_turning_and_stationary_trajectories_in_metres(self):
         t = np.linspace(0.0, 1.0, 80)
