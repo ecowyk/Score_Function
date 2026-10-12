@@ -17,9 +17,10 @@ import socket
 import subprocess
 import sys
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
-DEFAULT_QUEUE = Path("/home/data/wyk/outputs/score_aligned_1004/G_sigma_1012_v1")
+DEFAULT_QUEUE = Path("/home/data/wyk/outputs/score_aligned_1004/G_sigma_1012_8gpu_v1")
 
 
 def read(path, default=None):
@@ -309,7 +310,9 @@ def show_status(queue, plan):
 def run(args):
     queue = args.queue_dir.resolve()
     plan_path = queue / "plan.json"
-    with (queue / "queue.lock").open("a") as lock:
+    with ExitStack() as stack:
+        lock = stack.enter_context((queue / "queue.lock").open("a"))
+        locks = [lock]
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
@@ -317,6 +320,26 @@ def run(args):
                 "This queue or its training process is still active; use status"
             ) from exc
         plan = read(plan_path)
+        # Retain the legacy queue lock as well: its old runner does not know
+        # about this new queue, but it already honors its own queue.lock.
+        supersedes = plan.get("supersedes_queue")
+        if supersedes:
+            old_queue = Path(supersedes).expanduser().resolve()
+            if old_queue == queue:
+                raise ValueError("supersedes_queue must differ from the current queue")
+            if old_queue.exists():
+                old_lock_path = old_queue / "queue.lock"
+                old_lock = stack.enter_context(
+                    old_lock_path.open("r" if old_lock_path.exists() else "a")
+                )
+                try:
+                    fcntl.flock(old_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    raise RuntimeError(
+                        f"Superseded 4-GPU queue is still active: {old_queue}; "
+                        "no training was started or stopped"
+                    ) from exc
+                locks.append(old_lock)
         verify_plan(plan)
         plan_hash = digest(plan_path)
         identity_path = queue / "queue_identity.json"
@@ -393,7 +416,7 @@ def run(args):
                         stdout=log,
                         stderr=subprocess.STDOUT,
                         start_new_session=True,
-                        pass_fds=(lock.fileno(),),
+                        pass_fds=tuple(handle.fileno() for handle in locks),
                     )
                 entry.update(
                     state="running",
