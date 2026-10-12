@@ -1,6 +1,7 @@
 """Prepare real CPU-inspected fixed-sigma configs; only the large fork is mocked."""
 
 import copy
+import fcntl
 import importlib.util
 import shutil
 import subprocess
@@ -58,10 +59,12 @@ def experiment(tmp_path):
     return args, original, provenance, score
 
 
+@pytest.mark.parametrize("world", [4, 8])
 def test_three_fixed_sigma_jobs_use_real_budgets_frozen_code_and_readonly_source(
-    experiment, monkeypatch,
+    experiment, monkeypatch, world,
 ):
     args, original, provenance, score = experiment
+    args.gpus = ",".join(map(str, range(world)))
     source_before = {path.name: helper.digest(path) for path in score.iterdir()}
     code_before = helper.sources(args.source_code)
     real_run = subprocess.run
@@ -93,7 +96,8 @@ def test_three_fixed_sigma_jobs_use_real_budgets_frozen_code_and_readonly_source
         config = helper.read(job["config"])
         assert config == expected
         assert job["training_budget"] == training_budget(config["training"], 947912)
-        assert job["world_size"] == 4 and job["gpus"] == [0, 1, 2, 3]
+        assert job["world_size"] == world and job["gpus"] == list(range(world))
+        assert job["gradient_accumulation"] == 2048 // world // 256
         assert job["sources"] == provenance["sources"] == helper.sources(job["code"])
         assert job["parameters"] > 0
     for _, kwargs in preflights:
@@ -101,6 +105,8 @@ def test_three_fixed_sigma_jobs_use_real_budgets_frozen_code_and_readonly_source
         assert kwargs["env"]["PYTHONPATH"].split(":")[0] == str(args.queue_dir / "code/fixed")
     fork_command, fork_kwargs = forks[0]
     assert fork_command[fork_command.index("--epochs-extra") + 1] == "100"
+    assert fork_command[fork_command.index("--target-world-size") + 1] == str(world)
+    assert fork_kwargs["env"]["CUDA_VISIBLE_DEVICES"] == ("0" if world == 8 else "")
     assert fork_command[fork_command.index("--source-score") + 1] == str(
         args.queue_dir / "reference/score"
     )
@@ -141,3 +147,14 @@ def test_source_run_is_never_used_as_queue_output(experiment):
         helper.prepare(args)
     assert not args.queue_dir.exists()
     assert before == {path.name: helper.digest(path) for path in score.iterdir()}
+
+
+def test_active_previous_queue_is_rejected_before_new_output_creation(experiment):
+    args, _, _, _ = experiment
+    previous = args.root / "outputs/score_aligned_1004/G_sigma_1012_v1"
+    previous.mkdir(parents=True)
+    with (previous / "queue.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(RuntimeError, match="Previous four-GPU queue is still active"):
+            helper.prepare(args)
+    assert not args.queue_dir.exists()
