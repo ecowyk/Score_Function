@@ -111,13 +111,14 @@ def test_history_uses_recorded_closed_loop_states_and_observations(monkeypatch):
     assert all(x is not recorded[8].ego_state for x in late.ego_states)
 
 
-def test_find_log_requires_unique_saved_scenario_across_planners_and_formats(tmp_path):
+@pytest.mark.parametrize("directory", ["simulation", "simulation_log"])
+def test_find_log_requires_unique_saved_scenario_across_planners_and_formats(tmp_path, directory):
     token = "cf87d58064425ee7"
     with pytest.raises(ValueError, match="found 0"):
         helper.find_log(tmp_path, token)
     selected = (
         tmp_path
-        / "simulation"
+        / directory
         / "score_planner"
         / "following_lane_with_lead"
         / (token + ".msgpack.xz")
@@ -127,11 +128,51 @@ def test_find_log_requires_unique_saved_scenario_across_planners_and_formats(tmp
     unrelated = selected.with_name("other_token.msgpack.xz")
     unrelated.touch()
     assert helper.find_log(tmp_path, token) == selected
-    duplicate = tmp_path / "simulation" / "second_planner" / (token + ".pkl.xz")
-    duplicate.parent.mkdir()
+    other_directory = "simulation_log" if directory == "simulation" else "simulation"
+    duplicate = tmp_path / other_directory / "second_planner" / (token + ".pkl.xz")
+    duplicate.parent.mkdir(parents=True)
     duplicate.touch()
     with pytest.raises(ValueError, match="found 2"):
         helper.find_log(tmp_path, token)
+
+
+def test_find_log_honors_external_callback_root_and_deduplicates_resolved_paths(tmp_path):
+    run, external = tmp_path / "exact_run", tmp_path / "configured_logs"
+    run.mkdir()
+    external.mkdir()
+    token = "cf87d58064425ee7"
+    log = external / (token + ".msgpack.xz")
+    log.touch()
+    assert helper.find_log(run, token, log_root=external) == log.resolve()
+    # The explicitly configured root and an in-run link identify one saved log.
+    linked = run / "simulation_log" / log.name
+    linked.parent.mkdir()
+    linked.symlink_to(log)
+    assert helper.find_log(run, token, log_root=external) == log.resolve()
+    # Merely placing a second experiment nearby must not broaden the search.
+    other = tmp_path / "different_run" / log.name
+    other.parent.mkdir()
+    other.touch()
+    assert helper.find_log(run, token, log_root=external) == log.resolve()
+
+
+def test_empty_failed_capture_manifest_can_be_updated_but_real_captures_are_preserved(tmp_path):
+    old, new = {"capture_script_sha256": "old"}, {"capture_script_sha256": "new"}
+    helper.ensure_manifest(tmp_path, old)
+    helper.ensure_manifest(tmp_path, new)
+    assert helper.read(tmp_path / "capture_manifest.json") == new
+    for name in ("payload.json", "inputs.npz"):
+        path = tmp_path / "captures" / "I01" / "frame_0000" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"existing capture must survive")
+        before = (tmp_path / "capture_manifest.json").read_bytes()
+        with pytest.raises(ValueError):
+            helper.ensure_manifest(tmp_path, old)
+        assert (tmp_path / "capture_manifest.json").read_bytes() == before
+        assert path.read_bytes() == b"existing capture must survive"
+        # Matching provenance stays resumable even with existing captures.
+        helper.ensure_manifest(tmp_path, new)
+        path.unlink()
 
 
 def saved_sample():
