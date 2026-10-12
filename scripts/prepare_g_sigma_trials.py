@@ -3,6 +3,7 @@
 
 import argparse
 import copy
+import fcntl
 import hashlib
 import json
 import os
@@ -38,6 +39,19 @@ def digest(path):
 def sources(code):
     package = Path(code) / "score_function"
     return {str(p.relative_to(package)): digest(p) for p in sorted(package.rglob("*.py"))}
+
+
+def check_previous_queue(previous):
+    """Refuse an active older queue; never signal or modify its training process."""
+    if not previous.is_dir():
+        return
+    with (previous / "queue.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(
+                f"Previous four-GPU queue is still active: {previous}. Do not launch a duplicate queue."
+            ) from exc
 
 
 def clean_env(code, root):
@@ -135,7 +149,8 @@ print(json.dumps({'parameters':sum(p.numel() for p in m.parameters()),
 
 def prepare(args):
     root = args.root.expanduser().resolve()
-    queue = (args.queue_dir or root / "outputs/score_aligned_1004/G_sigma_1012_v1").resolve()
+    queue = (args.queue_dir or root / "outputs/score_aligned_1004/G_sigma_1012_8gpu_v1").resolve()
+    previous_queue = root / "outputs/score_aligned_1004/G_sigma_1012_v1"
     source_run = (
         args.source_run or root / "outputs/score_aligned_1004/after_L_G_DiT_v1/S05-G"
     ).resolve()
@@ -147,6 +162,7 @@ def prepare(args):
         )
     if queue == source_run or source_run in queue.parents or queue in source_run.parents:
         raise ValueError("Use a separate queue outside the source training run")
+    check_previous_queue(previous_queue)
     score = source_run / "score"
     original, info, provenance, status = (
         read(score / n)
@@ -168,10 +184,10 @@ def prepare(args):
         or Path(original["output"]).resolve() != source_run
     ):
         raise ValueError("Expected the actual completed aligned fixed-sigma S05-G run")
-    world = int(info["world_size"])
+    source_world = int(info["world_size"])
     budget = info["training_budget"]
     if (
-        world != 4
+        source_world != 4
         or info["global_batch"] != 2048
         or cfg["batch_size"] != 2048
         or info["microbatch_per_rank"] != 256
@@ -185,10 +201,13 @@ def prepare(args):
     ):
         raise ValueError("Source metadata differs from the recorded 4-GPU/529-epoch G protocol")
     gpu_ids = [int(x) for x in args.gpus.split(",")]
-    if len(gpu_ids) != world or len(set(gpu_ids)) != world or any(x < 0 for x in gpu_ids):
+    world = len(gpu_ids)
+    if world not in (4, 8) or len(set(gpu_ids)) != world or any(x < 0 for x in gpu_ids):
         raise ValueError(
-            "Provide exactly four different physical GPU IDs, matching source world size"
+            "Provide four or eight different physical GPU IDs"
         )
+    if cfg["batch_size"] % (world * cfg["microbatch_size"]):
+        raise ValueError("Global batch must be divisible by world size times microbatch")
     queue.mkdir(parents=True, exist_ok=False)
     try:
         reference = queue / "reference/score"
@@ -262,6 +281,11 @@ def prepare(args):
             if target_budget["planned_epochs"] != expected_epoch:
                 raise ValueError(f"Unexpected budget for {name}: {target_budget}")
             if resume:
+                fork_env = clean_env(code, root)
+                if world != source_world:
+                    # New ranks need device-native CUDA RNG states. This short-lived
+                    # subprocess uses one visible GPU solely to seed generators.
+                    fork_env["CUDA_VISIBLE_DEVICES"] = str(gpu_ids[0])
                 subprocess.run(
                     [
                         sys.executable,
@@ -274,9 +298,11 @@ def prepare(args):
                         str(run / "score"),
                         "--epochs-extra",
                         "100",
+                        "--target-world-size",
+                        str(world),
                     ],
                     cwd=code,
-                    env=clean_env(code, root),
+                    env=fork_env,
                     check=True,
                 )
             jobs.append(
@@ -287,6 +313,7 @@ def prepare(args):
                     output=str(run),
                     resume=resume,
                     world_size=world,
+                    gradient_accumulation=cfg["batch_size"] // world // cfg["microbatch_size"],
                     gpus=gpu_ids,
                     target_epochs=expected_epoch,
                     target_updates=target_budget["planned_optimizer_updates"],
@@ -312,10 +339,13 @@ def prepare(args):
             root=str(root),
             queue_dir=str(queue),
             source_run=str(source_run),
+            supersedes_queue=str(previous_queue),
             source_reference=reference_files,
             source_recovery=origins,
             protocol="S05-G continuation +100; fresh fixed sigma 0.10, then 0.025",
-            execution="sequential, source four-rank/global-batch/microbatch/accumulation retained",
+            execution="sequential, global batch and microbatch retained; accumulation derived from selected GPU count",
+            source_world_size=source_world,
+            target_world_size=world,
             jobs=jobs,
             files=files,
             preserved_settings="All original scientific/data/runtime settings except explicitly recorded sigma, budget and output changes",
@@ -339,7 +369,7 @@ def main():
     parser.add_argument("--queue-dir", type=Path)
     parser.add_argument("--source-run", type=Path)
     parser.add_argument("--source-code", type=Path)
-    parser.add_argument("--gpus", default="0,1,2,3")
+    parser.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
     args = parser.parse_args()
     prepare(args)
 
