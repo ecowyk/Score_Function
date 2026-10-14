@@ -13,7 +13,7 @@ import signal
 import subprocess
 import sys
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 import full_test14hard_suite as suite
@@ -258,6 +258,36 @@ for name,epoch,step,sigma in [('S05-G_plus100',629,290598,.05),('S10-G',529,2443
 """
 
 
+@contextmanager
+def evaluation_environment(env):
+    previous = os.environ.copy()
+    try:
+        os.environ.clear()
+        os.environ.update(env)
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(previous)
+
+
+def check_partial_preparation(out, old):
+    """Only recover known preparation artifacts; never overwrite evaluation output."""
+    allowed = {"code", "models", "jobs"}
+    allowed.update(f"models/{name}" for name in ("S05-G", *MODELS))
+    allowed.update(
+        f"models/{name}/{filename}"
+        for name in ("S05-G", *MODELS)
+        for filename in ("config.json", "final_ema.pt")
+    )
+    allowed.update(f"jobs/{job['id']}.json" for job in job_list([20])[:2])
+    for path in out.rglob("*"):
+        rel = path.relative_to(out).as_posix()
+        if rel not in allowed or (path.is_symlink() and rel != "code"):
+            raise ValueError(f"Unexpected partial preparation artifact: {path}")
+    if (out / "code").exists() or (out / "code").is_symlink():
+        verify_code_link(out, old)
+
+
 def prepare(args):
     out, old, queue = args.output.resolve(), args.source.resolve(), args.training.resolve()
     if (out / "plan.json").exists():
@@ -281,17 +311,22 @@ def prepare(args):
     jobs = {j["id"]: j for j in tp["jobs"]}
     for name in MODELS:
         training.inspect_checkpoint(jobs[name], suite.digest(queue / "plan.json"), final=True)
-    if out.exists() and any(out.iterdir()):
-        raise ValueError(f"Incomplete preparation exists: {out}; inspect it before retrying")
+    check_partial_preparation(out, old)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "code").symlink_to(old / "code", target_is_directory=True)
+    if not (out / "code").is_symlink():
+        (out / "code").symlink_to(old / "code", target_is_directory=True)
     for name in ("S05-G", *MODELS):
         source = old / "models/S05-G" if name == "S05-G" else Path(jobs[name]["output"]) / "score"
         destination = out / "models" / name
-        destination.mkdir(parents=True)
+        destination.mkdir(parents=True, exist_ok=True)
         for filename in ("config.json", "final_ema.pt"):
             before = suite.digest(source / filename)
-            shutil.copy2(source / filename, destination / filename)
+            target = destination / filename
+            if target.exists():
+                if suite.digest(target) != before:
+                    raise ValueError(f"Partial frozen model differs from source: {target}")
+            else:
+                shutil.copy2(source / filename, target)
             if (
                 suite.digest(destination / filename) != before
                 or suite.digest(source / filename) != before
@@ -333,7 +368,9 @@ def prepare(args):
         record = suite.read(old / "jobs" / (job["id"] + ".json"))
         if record["state"] not in ("complete", "reused"):
             raise ValueError(f"Original reference is not complete: {job['id']}")
-        metrics = suite.validate_result(record["result_dir"], job, plan, out)
+        # Saved Hydra YAML resolves oc.env in THIS process, not the inspector child.
+        with evaluation_environment(suite.env_for(Path(original["root"]), code, "")):
+            metrics = suite.validate_result(record["result_dir"], job, plan, out)
         suite.write(
             out / "jobs" / (job["id"] + ".json"), dict(record, state="reused", metrics=metrics)
         )
