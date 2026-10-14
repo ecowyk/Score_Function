@@ -291,3 +291,59 @@ def test_cpu_preflight_rejects_changed_noise_seed(cpu_models):
         text=True,
     )
     assert result.returncode != 0 and "AssertionError" in result.stderr
+
+
+def test_prepare_resolves_hydra_environment_and_restores_parent(eval_case, monkeypatch):
+    from omegaconf import OmegaConf
+
+    args, _ = eval_case
+    monkeypatch.delenv("NUPLAN_DATA_ROOT", raising=False)
+    monkeypatch.setenv("NUPLAN_MAPS_ROOT", "/stale/maps")
+    seen = []
+
+    def validate(*unused):
+        cfg = OmegaConf.create(
+            {
+                "data_root": "${oc.env:NUPLAN_DATA_ROOT}/nuplan-v1.1/test",
+                "maps": "${oc.env:NUPLAN_MAPS_ROOT}",
+                "exp": "${oc.env:NUPLAN_EXP_ROOT}",
+            }
+        )
+        root = args.source.parent / "dataset/nuplan"
+        assert cfg.data_root == str(root / "nuplan-v1.1/test")
+        assert cfg.maps == str(root / "maps")
+        assert cfg.exp == str(root / "exp")
+        seen.append(True)
+        return {}
+
+    monkeypatch.setattr(h.suite, "validate_result", validate)
+    h.prepare(args)
+    assert len(seen) == 2
+    assert "NUPLAN_DATA_ROOT" not in h.os.environ
+    assert h.os.environ["NUPLAN_MAPS_ROOT"] == "/stale/maps"
+
+
+def test_prepare_retries_partial_without_recopying_models(eval_case, monkeypatch):
+    args, _ = eval_case
+    validate = h.suite.validate_result
+    monkeypatch.setattr(
+        h.suite, "validate_result", lambda *a: (_ for _ in ()).throw(ValueError("interrupted"))
+    )
+    with pytest.raises(ValueError, match="interrupted"):
+        h.prepare(args)
+    assert not (args.output / "plan.json").exists()
+    model = args.output / "models/S10-G/final_ema.pt"
+    before = model.stat()
+    monkeypatch.setattr(h.suite, "validate_result", validate)
+    h.prepare(args)
+    assert (model.stat().st_ino, model.stat().st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    assert (args.output / "plan.json").exists()
+    h.prepare(args)
+
+
+def test_partial_preparation_rejects_changed_models(eval_case):
+    args, _ = eval_case
+    h.suite.write(args.output / "models/S10-G/config.json", {"changed": True})
+    with pytest.raises(ValueError, match="differs from source"):
+        h.prepare(args)
+    assert h.suite.read(args.output / "models/S10-G/config.json") == {"changed": True}
