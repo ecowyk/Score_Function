@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 
-import hydra  # Register Hydra/OmegaConf resolvers used in saved configs.
+from hydra.core.utils import setup_globals
 import numpy as np
 import pandas as pd
 import torch
@@ -21,6 +21,9 @@ EXP = ROOT / "dataset/nuplan/exp/exp/simulation/closed_loop_nonreactive_agents"
 
 def read_result(directory, expected_count):
     directory = Path(directory)
+    # Importing hydra alone does not register ${now:...}. This function is also
+    # called from a plain Python process, outside @hydra.main/compose.
+    setup_globals()
     cfg = OmegaConf.to_container(OmegaConf.load(directory / "code/hydra/config.yaml"), resolve=True)
     report = pd.read_parquet(directory / cfg.get("runner_report_file", "runner_report.parquet"))
     if len(report) != expected_count or not report.succeeded.eq(True).all():
