@@ -1,0 +1,6 @@
+# Add only these small Python dependencies to the working UrbanDriver environment.
+# Install with --no-deps to preserve its existing torch/numpy/nuPlan versions.
+mmengine==0.10.7
+addict==2.4.0
+termcolor==2.4.0
+yapf==0.40.2
