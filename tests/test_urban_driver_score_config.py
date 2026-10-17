@@ -15,6 +15,25 @@ spec.loader.exec_module(prepare)
 
 
 class SavedConfigTests(unittest.TestCase):
+    def test_smoke_reservations_work_with_real_sequential_worker(self):
+        from nuplan.planning.utils.multithreading.worker_pool import Task
+        from nuplan.planning.utils.multithreading.worker_sequential import Sequential
+
+        full = {"output_dir": "/result", "number_of_cpus_allocated_per_simulation": 2,
+                "number_of_gpus_allocated_per_simulation": 1.0,
+                "worker": {"_target_": "RayDistributed"},
+                "scenario_filter": {"limit_total_scenarios": None},
+                "planner": {"audit_dir": "/result/refinement_audit"}}
+        smoke = prepare.make_smoke_config(full, Path("/result"))
+        task = Task(fn=lambda value: value + 1,
+                    num_cpus=smoke["number_of_cpus_allocated_per_simulation"],
+                    num_gpus=smoke["number_of_gpus_allocated_per_simulation"])
+        self.assertEqual(Sequential().map(task, [1]), [2])
+        self.assertEqual(full["number_of_cpus_allocated_per_simulation"], 2)
+        self.assertEqual(full["worker"]["_target_"], "RayDistributed")
+        self.assertIsNone(full["scenario_filter"]["limit_total_scenarios"])
+        self.assertEqual(smoke["planner"]["audit_dir"], "/result/smoke/refinement_audit")
+
     def test_read_result_registers_nested_now_resolver_in_fresh_process(self):
         OmegaConf.clear_resolver("now")
         self.assertFalse(OmegaConf.has_resolver("now"))

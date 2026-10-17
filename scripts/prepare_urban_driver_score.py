@@ -63,6 +63,17 @@ def save_config(cfg, directory):
     OmegaConf.save(OmegaConf.create(cfg), directory / "config.yaml")
 
 
+def make_smoke_config(refined, out):
+    smoke = relocate(refined, str(out), str(out / "smoke"))
+    smoke["scenario_filter"]["limit_total_scenarios"] = 1
+    smoke["worker"] = {"_target_": "nuplan.planning.utils.multithreading.worker_sequential.Sequential", "_convert_": "all"}
+    # Sequential._map rejects a Task reserving more than one CPU. Keep the
+    # native full-run Ray reservation (two CPUs) unchanged in refined.
+    smoke["number_of_cpus_allocated_per_simulation"] = 1
+    smoke["disable_callback_parallelization"] = True
+    return smoke
+
+
 def prepare(out):
     from urban_driver_score.runtime import load_score
     import score_function
@@ -129,11 +140,7 @@ def prepare(out):
         "device": "cuda", "audit_dir": str(out / "refinement_audit"),
     }}
     save_config(refined, out / "launch/full")
-    smoke_dir = out / "smoke"
-    smoke = relocate(refined, str(out), str(smoke_dir))
-    smoke["scenario_filter"]["limit_total_scenarios"] = 1
-    smoke["worker"] = {"_target_": "nuplan.planning.utils.multithreading.worker_sequential.Sequential", "_convert_": "all"}
-    smoke["disable_callback_parallelization"] = True
+    smoke = make_smoke_config(refined, out)
     save_config(smoke, out / "launch/smoke")
     record = dict(baseline=str(baseline), baseline_score_100=score,
                   baseline_config_sha256=file_hash(baseline / "code/hydra/config.yaml"),
