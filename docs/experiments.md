@@ -1,5 +1,7 @@
 # 新方案的方法审阅与复现协议
 
+本文包含分阶段设计记录；实际执行以配置、[训练复现](reproduction.md)和[alignment.md](alignment.md)为准。
+
 日期：2026-09-24。方法 `score_function_v1`，包 `score_function`，版本0.1.0。
 
 当前新增的八组训练入口是 `scripts/launch_experiments.sh`，完整协议、GPU 分配、
@@ -99,6 +101,6 @@ x[k+1] = x[k] + gamma * sigma^2 * s(x[k],C,R)
 
 所有命令见README。新缓存只有target/context/route，分别为80×4、107×192、192；按512帧分shard，mmap按需读取。每百万帧float32张量约84.2GB（十进制，另加NPZ和metadata）。缓存与sigma无关，可跨sigma只读复用，但与base/归一化/manifest绑定。旧两个项目的缓存schema不兼容，会被拒绝。
 
-测试/调试代码位于tests；主代码位于src/score_function；原方案文档保留在docs；不从旧两个Python包导入。`previous_projects_hashes.json`用于确认旧目录未修改。真实运行产生的日志、checkpoint、图均写入配置的独立output，不混入源代码目录。
+测试/调试代码位于tests；主代码位于score_function；原方案文档保留在docs/archive；不从旧两个Python包导入。`archive/previous_projects_hashes.json`是初次迁移时确认旧目录未修改的历史记录。真实运行产生的日志、checkpoint、图均写入配置的独立output，不混入源代码目录。
 
 参考：[官方源码](https://github.com/ZhengYinan-AIR/Diffusion-Planner/tree/a3a621f0b724c5fa6447f7a2fbaf9e0387bd35df)、[Vincent固定高斯DSM理论](https://www.iro.umontreal.ca/~vincentp/Publications/smdae_techreport.pdf)。
