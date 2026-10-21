@@ -31,6 +31,8 @@ def fixture(directory, count=272):
     cfg = {
         "output_dir": str(directory),
         "runner_report_file": "runner_report.parquet",
+        "metric_dir": "metrics",
+        "aggregator_save_path": str(directory / "aggregator_metric"),
         "date_format": "%Y.%m.%d.%H.%M.%S",
         "seed": 123,
         "scenario_builder": {"_target_": "NuPlanScenarioBuilder", "data_root": "/data/test"},
@@ -44,7 +46,8 @@ def fixture(directory, count=272):
         "simulation_time_controller": {"_target_": "StepSimulationTimeController"},
         "simulation_history_buffer_duration": 2.0,
         "simulation_metric": {"metrics": {"ttc": {"horizon": 3.0}}},
-        "metric_aggregator": {"weighted": {"save_path": str(directory / "aggregator_metric")}},
+        "metric_aggregator": {"weighted": {"save_path": str(directory / "aggregator_metric"),
+                                           "challenge_name": "closed_loop_nonreactive_agents"}},
         "metric_file_name": "metrics_${now:${date_format}}",
         "model": {"_target_": "GC_PGP", "horizon": 8},
         "planner": {"ml_planner": {
@@ -52,7 +55,11 @@ def fixture(directory, count=272):
             "checkpoint_path": "/models/gc_pgp.ckpt",
         }},
         "worker": {"_target_": "worker", "max_workers": 4},
-        "main_callback": {"metric": {"metric_file_output_path": str(directory / "metrics")}},
+        "main_callback": {
+            "metric": {"metric_file_output_path": str(directory / "metrics"),
+                       "scenario_metric_paths": [str(directory / "metrics")]},
+            "aggregate": {"metric_save_path": str(directory / "metrics")},
+        },
     }
     OmegaConf.save(OmegaConf.create(cfg), directory / "code/hydra/config.yaml")
     report = pd.DataFrame([
@@ -69,6 +76,38 @@ def fixture(directory, count=272):
 
 
 class NativeQueueIntegrityTests(unittest.TestCase):
+    def test_smoke_completion_needs_no_aggregate_but_benchmark_still_requires_one(self):
+        for count in (0, 2):
+            with self.subTest(aggregates=count), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                _, _, metric, expected = fixture(root, 2)
+                (root / "aggregator_metric/result.parquet").unlink()
+                for index in range(count):
+                    metric.to_parquet(root / f"aggregator_metric/result_{index}.parquet")
+                cfg, keys = queue.read_completed_run(root, 2)
+                self.assertEqual(keys, expected)
+                self.assertIn("planner", cfg)
+                with self.assertRaisesRegex(ValueError, f"found {count}"):
+                    queue.read_result(root, 2)
+
+    def test_smoke_rejects_failed_missing_duplicate_and_null_scenario_identities(self):
+        for mode in ("failed", "missing", "duplicate", "null"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                _, report, _, _ = fixture(root, 2)
+                if mode == "failed":
+                    report.loc[0, "succeeded"] = False
+                elif mode == "missing":
+                    report = report.iloc[:1]
+                elif mode == "duplicate":
+                    report.loc[1, ["log_name", "scenario_name"]] = report.loc[
+                        0, ["log_name", "scenario_name"]].values
+                else:
+                    report.loc[0, "scenario_name"] = None
+                report.to_parquet(root / "runner_report.parquet")
+                with self.assertRaises(ValueError):
+                    queue.read_completed_run(root, 2)
+
     def test_complete_272_and_fresh_hydra_resolver_are_read_only(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -174,7 +213,15 @@ class NativeQueueIntegrityTests(unittest.TestCase):
             self.assertEqual(raw["scenario_filter"]["scenario_tokens"], sorted(k[1] for k in keys))
             self.assertTrue(raw["scenario_filter"]["remove_invalid_goals"])
             self.assertEqual(refined["main_callback"]["metric"]["metric_file_output_path"],
-                             str(refined_dir / "metrics"))
+                             str(refined_dir / "metrics/closed_loop_nonreactive_agents"))
+            for config, directory in ((raw, raw_dir), (refined, refined_dir)):
+                metric_path = str(directory / "metrics/closed_loop_nonreactive_agents")
+                self.assertEqual(config["metric_dir"], "metrics/closed_loop_nonreactive_agents")
+                self.assertEqual(config["main_callback"]["metric"]["scenario_metric_paths"], [metric_path])
+                self.assertEqual(config["main_callback"]["aggregate"]["metric_save_path"], metric_path)
+                self.assertEqual(config["metric_aggregator"]["weighted"]["challenge_name"],
+                                 base["metric_aggregator"]["weighted"]["challenge_name"])
+                self.assertEqual(config["aggregator_save_path"], str(directory / "aggregator_metric"))
             self.assertEqual(base, untouched)
             with self.assertRaisesRegex(ValueError, "never another refiner"):
                 queue.make_refined_config(
@@ -264,6 +311,9 @@ class NativeQueueSequenceTests(unittest.TestCase):
             else:
                 cfg["planner"]["ml_planner"]["checkpoint_path"] = str(checkpoint)
             OmegaConf.save(OmegaConf.create(cfg), smoke / "code/hydra/config.yaml")
+            # Real custom smoke paths can finish successfully without an
+            # aggregate: nuPlan filters metric paths by challenge name.
+            (smoke / "aggregator_metric/result.parquet").unlink()
         (models / "score.json").write_text("{}")
         (models / "score.pt").write_bytes(b"synthetic EMA identity only")
         environment = {

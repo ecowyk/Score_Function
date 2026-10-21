@@ -20,6 +20,7 @@ cd "$UD_ROOT/tuplan_garage"
 test -s "$SCORE_CHECKPOINT"
 test -s "$FROZEN_SCORE_CODE/score_function/model/refinement.py"
 CUDA_VISIBLE_DEVICES="" "$PYTHON" "$CODE_ROOT/tests/test_native_planner_score.py"
+CUDA_VISIBLE_DEVICES="" "$PYTHON" "$CODE_ROOT/tests/test_native_score_metrics.py"
 QUEUE_ROOT=${QUEUE_ROOT:-$NUPLAN_EXP_ROOT/native_score_queue_$(date +%Y%m%d_%H%M%S)}
 args=(--output "$QUEUE_ROOT" --workers 8)
 if [[ -n "${BASELINE_FULL_ROOT:-}" ]]; then

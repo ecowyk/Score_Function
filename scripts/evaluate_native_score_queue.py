@@ -32,20 +32,34 @@ def load_saved_config(directory):
         OmegaConf.load(Path(directory) / "code/hydra/config.yaml"), resolve=True)
 
 
-def read_result(directory, expected_count=272):
+def read_completed_run(directory, expected_count):
+    """Validate simulation completion; an integration smoke needs no benchmark score."""
     directory = Path(directory)
     cfg = load_saved_config(directory)
     report = pd.read_parquet(directory / cfg.get("runner_report_file", "runner_report.parquet"))
-    if len(report) != expected_count or not report.succeeded.eq(True).all():
+    required = {"succeeded", "log_name", "scenario_name"}
+    if not required.issubset(report.columns):
+        raise ValueError(f"{directory}: runner report is missing completion/identity columns")
+    if len(report) != expected_count or not report.succeeded.eq(True).fillna(False).all():
         raise ValueError(f"{directory}: require {expected_count}/{expected_count} successful scenarios")
-    files = list((directory / "aggregator_metric").glob("*.parquet"))
+    keys = sorted(zip(report.log_name.astype(str), report.scenario_name.astype(str)))
+    if report[["log_name", "scenario_name"]].isna().any().any() or len(set(keys)) != expected_count:
+        raise ValueError(f"{directory}: missing or duplicate runner scenario identities")
+    return cfg, keys
+
+
+def read_result(directory, expected_count=272):
+    directory = Path(directory)
+    cfg, report_keys = read_completed_run(directory, expected_count)
+    aggregate_dir = Path(cfg.get("aggregator_save_path", directory / "aggregator_metric"))
+    files = list(aggregate_dir.glob("*.parquet"))
     if len(files) != 1:
-        raise ValueError(f"{directory}: require exactly one official aggregate")
+        raise ValueError(f"{directory}: require exactly one official aggregate; "
+                         f"found {len(files)} in {aggregate_dir}")
     frame = pd.read_parquet(files[0])
     detail = frame.loc[frame.log_name.notna()].copy()
     final = frame.loc[frame.scenario.eq("final_score")]
     keys = sorted(zip(detail.log_name.astype(str), detail.scenario.astype(str)))
-    report_keys = sorted(zip(report.log_name.astype(str), report.scenario_name.astype(str)))
     if len(keys) != expected_count or len(set(keys)) != expected_count or keys != report_keys:
         raise ValueError(f"{directory}: missing, duplicate, or mismatched scenario identities")
     if len(final) != 1 or int(final.iloc[0].num_scenarios) != expected_count:
@@ -68,6 +82,21 @@ def relocate(value, old, new):
 
 def execution_config(cfg, out, workers):
     cfg = relocate(copy.deepcopy(cfg), str(cfg["output_dir"]).rstrip("/"), str(out))
+    # The official MetricAggregatorCallback selects metric parquet files by
+    # challenge-name substring in their FULL PATH. Custom output_dir names lose
+    # that substring, so keep it in metric_dir and every resolved callback path.
+    # Preserve the official aggregator, weights and challenge unchanged.
+    challenges = {item.get("challenge_name") for item in cfg.get("metric_aggregator", {}).values()
+                  if item.get("challenge_name")}
+    if len(challenges) > 1:
+        raise ValueError("The paired queue requires a single evaluation challenge")
+    if challenges:
+        challenge = next(iter(challenges))
+        metric_dir = Path(cfg.get("metric_dir", "metrics"))
+        old_metrics = str(Path(out) / metric_dir)
+        if challenge not in old_metrics:
+            cfg = relocate(cfg, old_metrics, str(Path(old_metrics) / challenge))
+            cfg["metric_dir"] = str(metric_dir / challenge)
     cfg.update(output_dir=str(out), number_of_gpus_allocated_per_simulation=1.0,
                number_of_cpus_allocated_per_simulation=2, disable_callback_parallelization=True,
                distributed_mode="SINGLE_NODE", exit_on_failure=True, run_metric=True)
@@ -323,7 +352,11 @@ def run_queue(args, root, exp, out):
     hashes = {str(score_config): file_hash(score_config), str(score_checkpoint): file_hash(score_checkpoint)}
     for name in ("pdm_open", "gc_pgp"):
         smoke = latest(exp / "baseline_smoke", name + "_*")
-        smoke_cfg, _, _, _ = read_result(smoke, 2)
+        # Earlier two-scenario smokes used custom paths without the challenge
+        # name, so official aggregation may be absent despite successful runs.
+        # Only their tested planner/model config is reused, never their scores.
+        smoke_cfg, _ = read_completed_run(smoke, 2)
+        print(f"SMOKE CONFIG {name}: 2/2 successful scenarios; {smoke}", flush=True)
         expected[name] = make_native_config(base, smoke_cfg, out / name / "raw", keys, args.workers)
         planner = next(iter(expected[name]["planner"]["native_score"]["native_planner_config"].values()))
         checkpoint = Path(planner["checkpoint_path"])

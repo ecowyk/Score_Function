@@ -2,7 +2,7 @@
 
 This queue uses the completed UrbanDriver hard14 NR run as the authoritative
 272-scenario cohort and evaluation configuration. It takes each native planner
-configuration from its successful two-scenario smoke result. It executes:
+configuration from its successful two-scenario smoke runner report. It executes:
 
 1. PDM-Open native (or reuses its completed, matching result).
 2. PDM-Open K20 one-scenario integration check, then all 272 K20 scenarios.
@@ -69,7 +69,15 @@ record epoch, sigma, completed steps and finite output for each scenario.
 Checkpoint/config hashes are checked before and after evaluation.
 
 Each new run relocates all nested metric and callback output paths. Old outputs
-remain untouched. Failed scenarios, missing metrics, mismatched cohorts and
+remain untouched. The official aggregator filters metric file paths by challenge
+name, so custom queue outputs retain `closed_loop_nonreactive_agents` inside
+`metric_dir` and all corresponding callback paths. The official challenge and
+scoring weights remain unchanged. Existing two-scenario smokes need two unique,
+successful runner reports and a saved config; their scores are not used. The K20
+integration check and all full evaluations still require the official aggregate.
+Before launching any scenarios, a short synthetic check exercises the installed
+nuPlan metric callbacks and official aggregator with the relocated paths.
+Failed scenarios, missing benchmark metrics, mismatched cohorts and
 invalid K20 audits stop the queue. Completed stages can be resumed with the same
 `QUEUE_ROOT`; incomplete output directories require inspection and a fresh queue
 directory rather than being silently overwritten.
