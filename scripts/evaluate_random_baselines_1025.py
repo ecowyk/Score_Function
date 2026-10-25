@@ -22,6 +22,8 @@ import sys
 import time
 import traceback
 
+from nuplan_environment_1025 import nuplan_paths
+
 CODE = Path(__file__).resolve().parent.parent
 VARIANTS = ("urban_driver", "plantf_epoch17", "plantf_epoch24", "pdm_open", "gc_pgp", "pluto_wo_refine")
 CHALLENGE = "closed_loop_nonreactive_agents"
@@ -222,9 +224,8 @@ def environment(plan, name):
     if family(name) != "urbandriver":
         paths.append(root / "tuplan_garage")
     env = os.environ.copy()
+    env.update(nuplan_paths(root))
     env.update(PYTHONPATH=os.pathsep.join(map(str, paths)), CUDA_VISIBLE_DEVICES=GPU_IDS,
-        NUPLAN_DEVKIT_ROOT=str(root / "nuplan-devkit"), NUPLAN_DATA_ROOT=str(root / "dataset/nuplan"),
-        NUPLAN_MAPS_ROOT=str(root / "dataset/nuplan/maps"), NUPLAN_EXP_ROOT=str(root / "dataset/nuplan/exp"),
         OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", HYDRA_FULL_ERROR="1",
         NODE_RANK="0", NUM_NODES="1", PYTHONUNBUFFERED="1")
     for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "LOCAL_WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT",
@@ -235,6 +236,9 @@ def environment(plan, name):
 
 def prepare(args):
     out, root = args.output.resolve(), args.root.resolve()
+    # Also support direct Python / shell entry points without a prior export.
+    # --root is authoritative even if the shell contains stale nuPlan paths.
+    os.environ.update(nuplan_paths(root))
     plan_path = out / "plan.json"
     if plan_path.exists():
         plan = read(plan_path)
@@ -296,7 +300,8 @@ def prepare(args):
                       root / "planTF/src", root / "pluto/src", root / "tuplan_garage/tuplan_garage"]:
         require(directory.is_dir(), f"Missing code directory: {directory}")
         input_files.extend(directory.rglob("*.py"))
-    input_files.extend([Path(__file__).resolve(), CODE / "scripts/evaluate_native_score_queue.py"])
+    input_files.extend([Path(__file__).resolve(), CODE / "scripts/evaluate_native_score_queue.py",
+                        CODE / "scripts/nuplan_environment_1025.py"])
     hashes = {str(path): digest(path) for path in sorted(set(input_files))}
     plan = dict(schema_version=1, root=str(root), host=socket.gethostname(), split=SPLIT, challenge=CHALLENGE,
         seed=args.seed, gamma=.1, sigma=.1, ks=[0, 20], variants=list(VARIANTS), scenario_keys=cohort,

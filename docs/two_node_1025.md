@@ -36,6 +36,10 @@ fi
 
 脚本在前台准备和核对输入，然后自动转入后台，不需要手动运行 tmux/nohup。每组正式评测使用八张 GPU（0–7），Ray 每个场景保留一张卡。PDM-Open 的原生推理保留其官方 CPU 实现；K20 score 在 GPU 上执行，与此前 hard_NR 协议一致。队列逐组运行，不同时启动 12 个八卡进程。
 
+启动器在准备阶段就按 `--root` 设置 `NUPLAN_DATA_ROOT`、`NUPLAN_MAPS_ROOT`、`NUPLAN_EXP_ROOT`、`NUPLAN_DEVKIT_ROOT` 和 `DP_DIR`，供两个节点解析已有 Hydra 配置；无需事先手动 `export`。直接调用 Random 的 Python 或 shell 队列入口也会初始化这些路径。
+
+若旧版启动器在准备阶段报 `Environment variable 'NUPLAN_DATA_ROOT' not found`，此时尚未启动仿真，也未写入新队列的 `plan.json`。更新代码后重新运行同一启动命令即可，无需删除输出目录或加 `--retry-failed`。
+
 ```bash
 tail -f /home/data/wyk/dataset/nuplan/exp/random_baselines_1025_v1.queue.log
 /home/data/wyk/envs/urbandriver/bin/python /home/data/wyk/Score_Function_TwoNode_1025/scripts/evaluate_random_baselines_1025.py status --output /home/data/wyk/dataset/nuplan/exp/random_baselines_1025_v1

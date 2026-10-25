@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -41,6 +42,49 @@ def source(name):
 
 
 class RandomQueueTests(unittest.TestCase):
+    def test_prepare_resolves_saved_hydra_paths_without_shell_exports(self):
+        # Exercise the failing read_result call, not just the path helper.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = root / "completed_dp"
+            cfg, _, _, cohort = native_tests.fixture(baseline, 3)
+            cfg["scenario_builder"]["data_root"] = "${oc.env:NUPLAN_DATA_ROOT}/nuplan-v1.1/test"
+            cfg["maps_root"] = "${oc.env:NUPLAN_MAPS_ROOT}"
+            cfg["exp_root"] = "${oc.env:NUPLAN_EXP_ROOT}"
+            cfg["devkit_root"] = "${oc.env:NUPLAN_DEVKIT_ROOT}"
+            cfg["dp_root"] = "${oc.env:DP_DIR}"
+            OmegaConf.save(OmegaConf.create(cfg), baseline / "code/hydra/config.yaml")
+            matrix = root / "matrix/plan.json"
+            queue.write(matrix, {"scenario_keys": {queue.SPLIT: cohort, "test14-hard": cohort}})
+            queue.write(matrix.parent / "jobs/random_NR_seed20260920_K0.json",
+                        dict(state="complete", K=0, seed=20260920, setting="random_NR",
+                             scenario_keys=cohort, result_dir=str(baseline)))
+            args = SimpleNamespace(root=root, output=root / "new_queue", matrix=matrix,
+                                   seed=20260920, frozen_score_code=None, score_config=None,
+                                   score_checkpoint=None)
+            read_result = queue.shared().read_result
+
+            class ReferenceChecked(Exception):
+                pass
+
+            def check_reference(*args):
+                resolved, _, actual, _ = read_result(*args)
+                self.assertEqual(resolved["scenario_builder"]["data_root"],
+                                 str(root / "dataset/nuplan/nuplan-v1.1/test"))
+                self.assertEqual(resolved["maps_root"], str(root / "dataset/nuplan/maps"))
+                self.assertEqual(resolved["exp_root"], str(root / "dataset/nuplan/exp"))
+                self.assertEqual(resolved["devkit_root"], str(root / "nuplan-devkit"))
+                self.assertEqual(resolved["dp_root"], str(root / "Diffusion-Planner"))
+                self.assertEqual(actual, sorted(cohort))
+                raise ReferenceChecked()
+
+            for inherited in ({}, {key: "/stale" for key in queue.nuplan_paths(root)}):
+                with self.subTest(inherited=inherited), mock.patch.dict("os.environ", inherited, clear=True), \
+                        mock.patch.object(queue.shared(), "read_result", side_effect=check_reference), \
+                        self.assertRaises(ReferenceChecked):
+                    queue.prepare(args)
+            self.assertFalse(args.output.exists())
+
     def test_six_variants_twelve_jobs_no_dp(self):
         self.assertEqual(len(queue.VARIANTS), 6)
         self.assertEqual(set(queue.VARIANTS), {"urban_driver", "plantf_epoch17", "plantf_epoch24",

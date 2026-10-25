@@ -12,6 +12,8 @@ import subprocess
 import sys
 import time
 
+from nuplan_environment_1025 import nuplan_paths
+
 
 CODE = Path(__file__).resolve().parent.parent
 
@@ -67,6 +69,9 @@ def main():
                 print(metadata_path.read_text())
             return
         env = os.environ.copy()
+        # Both preparation controllers resolve saved Hydra configs before
+        # spawning GPU workers. Initialize their environment as well.
+        env.update(nuplan_paths(root))
         env.update(CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7", PYTHONUNBUFFERED="1",
                    OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1")
         for name in ("RANK", "WORLD_SIZE", "LOCAL_RANK", "LOCAL_WORLD_SIZE", "MASTER_ADDR",
