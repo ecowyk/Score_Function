@@ -42,6 +42,114 @@ def source(name):
 
 
 class RandomQueueTests(unittest.TestCase):
+    def test_sorted_plan_roundtrip_restores_callback_order_without_protocol_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cfg, _, _, _ = native_tests.fixture(root / "reference", 3)
+            cfg = queue.shared().load_saved_config(root / "reference")
+            cfg["main_callback"] = {
+                "a_start": {"_target_": "callbacks.Start", "value": 1},
+                "metric_file_callback": {"_target_": "callbacks.MetricFileCallback", "path": "/metrics"},
+                "metric_other": {"_target_": "callbacks.Other", "value": 2},
+                "metric_aggregator_callback": {"_target_": "callbacks.MetricAggregatorCallback", "path": "/metrics"},
+                "metric_summary_callback": {"_target_": "callbacks.MetricSummaryCallback", "path": "/summary"},
+                "z_end": {"_target_": "callbacks.End", "value": 3},
+            }
+            path = root / "plan.json"
+            queue.write(path, {"configs": {"urban_driver": {"0": cfg}}})
+            loaded = queue.read(path)["configs"]["urban_driver"]["0"]
+            before = list(loaded["main_callback"])
+            self.assertLess(before.index("metric_aggregator_callback"), before.index("metric_file_callback"))
+            fixed = queue.order_metric_callbacks(loaded)
+            after = list(fixed["main_callback"])
+            self.assertLess(after.index("metric_file_callback"), after.index("metric_aggregator_callback"))
+            self.assertLess(after.index("metric_aggregator_callback"), after.index("metric_summary_callback"))
+            for key in ("a_start", "metric_other", "z_end"):
+                self.assertEqual(before.index(key), after.index(key))
+            self.assertEqual(fixed, loaded)
+            self.assertEqual(list(loaded["main_callback"]), before)
+            self.assertEqual(queue.shared().evaluation_signature(fixed), queue.shared().evaluation_signature(loaded))
+            simulation_yaml = root / "simulation.yaml"
+            OmegaConf.save(OmegaConf.create(fixed), simulation_yaml)
+            self.assertEqual(list(OmegaConf.load(simulation_yaml).main_callback), after)
+            fixed["main_callback"]["metric_file_callback"]["path"] = "/different"
+            self.assertEqual(loaded["main_callback"]["metric_file_callback"]["path"], "/metrics")
+
+    def test_metric_callback_aliases_use_targets_and_standard_keys_also_work(self):
+        for callbacks in (
+            {"first": {"_target_": "nuplan.callbacks.MetricSummaryCallback"},
+             "keep": {"_target_": "nuplan.callbacks.Other"},
+             "second": {"_target_": "nuplan.callbacks.MetricAggregatorCallback"},
+             "third": {"_target_": "nuplan.callbacks.MetricFileCallback"}},
+            {"metric_summary_callback": {}, "keep": {},
+             "metric_aggregator_callback": {}, "metric_file_callback": {}},
+        ):
+            with self.subTest(callbacks=callbacks):
+                cfg = {"main_callback": callbacks}
+                fixed = queue.order_metric_callbacks(cfg)
+                keys = list(callbacks)
+                self.assertEqual(list(fixed["main_callback"]), [keys[3], "keep", keys[2], keys[0]])
+                self.assertEqual(fixed, cfg)
+                self.assertEqual(queue.order_metric_callbacks(fixed), fixed)
+
+    def test_stage_generates_aggregate_after_sorted_plan_for_smoke_and_full(self):
+        for smoke in (True, False):
+            with self.subTest(smoke=smoke), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                base, _, _, cohort = native_tests.fixture(root / "reference", 3)
+                cfg = queue.make_config("urban_driver", base, source("urban_driver"),
+                                        root / "urban_driver/native", cohort, 0,
+                                        "/score/config.json", "/score/final_ema.pt", 20260920)
+                cfg["main_callback"] = {
+                    "metric_file_callback": {"_target_": "callbacks.MetricFileCallback"},
+                    "metric_aggregator_callback": {"_target_": "callbacks.MetricAggregatorCallback"},
+                    "metric_summary_callback": {"_target_": "callbacks.MetricSummaryCallback"},
+                }
+                path = root / "plan.json"
+                queue.write(path, dict(scenario_keys=cohort, configs={"urban_driver": {"0": cfg}},
+                    sources={"urban_driver": {"runtime": {"entry": "/simulate.py"}}}))
+                plan = queue.read(path)
+                events = []
+
+                def callbacks_simulation(config, directory, entry, environment):
+                    # Reproduce the official forward iteration dependency with
+                    # real parquet files and the real final result validator.
+                    directory = Path(directory)
+                    (directory / "code/hydra").mkdir(parents=True)
+                    OmegaConf.save(OmegaConf.create(config), directory / "code/hydra/config.yaml")
+                    selected = [(log, token) for log, token in cohort
+                                if token in config["scenario_filter"]["scenario_tokens"]]
+                    pd.DataFrame([dict(log_name=log, scenario_name=token, succeeded=True)
+                                  for log, token in selected]).to_parquet(directory / "runner_report.parquet")
+                    frame = pd.DataFrame([dict(log_name=log, scenario=token, score=.5, num_scenarios=1)
+                                          for log, token in selected] + [dict(log_name=None,
+                                          scenario="final_score", score=.5, num_scenarios=len(selected))])
+                    metric = directory / "metric_file.parquet"
+                    aggregate = Path(config["aggregator_save_path"]) / "result.parquet"
+                    for callback in config["main_callback"].values():
+                        name = callback["_target_"].rsplit(".", 1)[-1]
+                        events.append(name)
+                        if name == "MetricFileCallback":
+                            frame.to_parquet(metric)
+                        elif name == "MetricAggregatorCallback" and metric.exists():
+                            aggregate.parent.mkdir(parents=True, exist_ok=True)
+                            pd.read_parquet(metric).to_parquet(aggregate)
+
+                bad = queue.shared().execution_config(plan["configs"]["urban_driver"]["0"], root / "bad", 1)
+                callbacks_simulation(bad, root / "bad", Path("/simulate.py"), {})
+                with self.assertRaisesRegex(ValueError, "found 0"):
+                    queue.shared().read_result(root / "bad", len(cohort))
+                events.clear()
+                before = copy.deepcopy(plan)
+                with mock.patch.object(queue, "verify_hashes"), \
+                        mock.patch.object(queue, "environment", return_value={}), \
+                        mock.patch.object(queue.shared(), "run_simulation", side_effect=callbacks_simulation):
+                    result = queue.stage(plan, root, "urban_driver", 0, smoke, False)
+                self.assertEqual(events, ["MetricFileCallback", "MetricAggregatorCallback", "MetricSummaryCallback"])
+                self.assertEqual(len(result[2]), 1 if smoke else len(cohort))
+                self.assertEqual(result[3], 50.)
+                self.assertEqual(plan, before)
+
     def test_prepare_resolves_saved_hydra_paths_without_shell_exports(self):
         # Exercise the failing read_result call, not just the path helper.
         with tempfile.TemporaryDirectory() as temporary:

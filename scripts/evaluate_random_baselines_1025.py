@@ -75,6 +75,33 @@ def shared():
     return evaluate_native_score_queue
 
 
+def order_metric_callbacks(cfg):
+    """Copy config and restore metric dependencies after sorted JSON loading.
+
+    nuPlan runs main callbacks in mapping order: metric files must be written
+    before aggregation, then summaries can consume the aggregate. Keep every
+    other callback in its original slot and preserve all callback settings.
+    """
+    result = copy.deepcopy(cfg)
+    callbacks = result.get("main_callback", {})
+    ranks = {"MetricFileCallback": 0, "MetricAggregatorCallback": 1, "MetricSummaryCallback": 2,
+             "metric_file_callback": 0, "metric_aggregator_callback": 1, "metric_summary_callback": 2}
+    items = list(callbacks.items())
+    ordered = []
+    slots = []
+    for index, (key, callback) in enumerate(items):
+        target = str(callback.get("_target_", "")).rsplit(".", 1)[-1] if isinstance(callback, dict) else ""
+        rank = ranks.get(target, ranks.get(key))
+        if rank is not None:
+            slots.append(index)
+            ordered.append((rank, (key, callback)))
+    for index, (_, item) in zip(slots, sorted(ordered, key=lambda entry: entry[0])):
+        items[index] = item
+    if "main_callback" in result:
+        result["main_callback"] = dict(items)
+    return result
+
+
 def native_planner(name, source):
     planner = copy.deepcopy(source["planner"])
     if "native_score" in planner:
@@ -416,6 +443,7 @@ def stage(plan, out, name, steps, smoke, retry_failed):
             archived = directory.with_name(directory.name + ".failed." + str(time.time_ns()))
             directory.rename(archived)
             print(f"PRESERVED failed attempt: {archived}", flush=True)
+    cfg = order_metric_callbacks(cfg)
     shared().run_simulation(cfg, directory, Path(plan["sources"][name]["runtime"]["entry"]), env)
     result = validate_stage(directory, cfg, cohort, name, steps)
     verify_hashes(plan)
