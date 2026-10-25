@@ -78,6 +78,17 @@ and copy the resulting file to
 `/home/data/wyk/pluto/checkpoints/pluto_1M_aux_cil.ckpt`, then rerun setup. It will
 verify an existing correct file without downloading it again.
 
+NATTEN is installed from its exact official GitHub release wheel for Python 3.9,
+Torch 2.0 and CUDA 11.8, verifying the release asset's published SHA256
+`f12b90c03d9c8635b0491922de3b6452e4e33cc0cb041521f3ea04a0acca0ac4`,
+rather than parsing the archive's HTML index. This avoids
+pip's `Content-Type: Unknown` / `No matching distribution` error when a proxy
+returns an unusable index response. An already installed matching version is
+reused; the CUDA kernel check still runs at the end. After a completed environment
+clone, rerunning setup resumes dependency installation without cloning again.
+For corporate TLS certificates, pip accepts a CA bundle through `PIP_CERT`;
+certificate configuration is not changed globally by this script.
+
 ```bash
 cd /home/data/wyk/Score_Function_PLUTO_1025
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7

@@ -50,8 +50,24 @@ PYTHON="$PLUTO_ENV/bin/python"
 "$PYTHON" -m pip uninstall --yes torchaudio
 "$PYTHON" -m pip install --upgrade 'torch==2.0.1' 'torchvision==0.15.2' \
   --index-url https://download.pytorch.org/whl/cu118
-"$PYTHON" -m pip install --no-deps --only-binary=:all: \
-  'natten==0.14.6+torch200cu118' -f https://whl.natten.org/old/
+# Use the official cp39 wheel directly. Some proxies return the archive index
+# without a usable Content-Type, causing pip to silently skip all its wheels.
+# Avoid downloading the 74 MB wheel again when resuming later setup stages.
+if "$PYTHON" - <<'PY'
+from importlib.metadata import PackageNotFoundError, version
+try:
+    installed = version("natten")
+except PackageNotFoundError:
+    installed = None
+raise SystemExit(0 if installed == "0.14.6+torch200cu118" else 1)
+PY
+then
+  echo 'NATTEN 0.14.6+torch200cu118 already installed; CUDA validation follows.'
+else
+  # SHA256 is published by GitHub for official release asset 326070037.
+  "$PYTHON" -m pip install --no-index --no-deps --only-binary=:all: \
+    'https://github.com/SHI-Labs/NATTEN/releases/download/v0.14.6/natten-0.14.6%2Btorch200cu118-cp39-cp39-linux_x86_64.whl#sha256=f12b90c03d9c8635b0491922de3b6452e4e33cc0cb041521f3ea04a0acca0ac4'
+fi
 
 # Explicit compatibility pins for Python 3.9 / nuPlan 1.2.2 and the frozen DP
 # encoder. In particular avoid NumPy 2 and recent pyarrow's NumPy-2 typing API.
