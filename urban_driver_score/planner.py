@@ -21,6 +21,8 @@ LOG = logging.getLogger(__name__)
 
 
 class UrbanDriverScorePlanner(AbstractPlanner):
+    native_pose_count = 16
+
     def __init__(self, model_config, checkpoint_path, score_config, score_checkpoint,
                  steps=20, gamma=.1, sigma=.1, heading_projection=True,
                  audit_dir=None, device="cuda"):
@@ -94,15 +96,14 @@ class UrbanDriverScorePlanner(AbstractPlanner):
             raise RuntimeError("Refinement did not execute all 20 steps")
         revised = denormalize_ego_future(result, self._args.state_normalizer)
         poses = physical_to_poses(revised[0].detach().cpu().numpy())
-        states = transform_predictions_to_states(poses, current_input.history.ego_states, 8., .1)
-        trajectory = InterpolatedTrajectory(states)
+        trajectory = self._trajectory_from_poses(poses, current_input)
         if not self._audited and self.audit_dir:
             directory = Path(self.audit_dir)
             directory.mkdir(parents=True, exist_ok=True)
             # One small audit per scenario, rather than tracing every frame.
             audit = dict(self._checkpoint_metadata, K=self.steps, gamma=self.gamma,
                          timestamp_us=ego.time_point.time_us,
-                         native_pose_count=16, score_pose_count=80,
+                         native_pose_count=self.native_pose_count, score_pose_count=80,
                          completed_steps=trace["completed_steps"],
                          finite=bool(torch.isfinite(revised).all()),
                          mean_xy_change_m=float(torch.linalg.vector_norm(
@@ -113,6 +114,10 @@ class UrbanDriverScorePlanner(AbstractPlanner):
             LOG.info("First-frame refinement audit: %s", audit)
         self._audited = True
         return trajectory
+
+    def _trajectory_from_poses(self, poses, current_input):
+        states = transform_predictions_to_states(poses, current_input.history.ego_states, 8., .1)
+        return InterpolatedTrajectory(states)
 
     @torch.no_grad()
     def compute_planner_trajectory(self, current_input):
