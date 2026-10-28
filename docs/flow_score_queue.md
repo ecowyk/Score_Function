@@ -189,5 +189,11 @@ RNG preservation. Queue tests validate stage order, eight-GPU configuration,
 exact cohort, official aggregation paths and resume rejection. These are not
 benchmark results. Setup checks CUDA on the server; the two single-scenario
 runs check real map/features and frozen-score integration before full runs.
+Trajectory tests compare every state field exactly against official Flow
+conversion for identical float32/float64 inputs. A separate test checks the
+float32 score-sampling roundtrip's position, wrapped heading and exact timing.
+It does not equate re-derived velocities after quantization with the original
+ones: at the +/-pi branch boundary, nuPlan's signed-heading interpolation can
+amplify rounding differences. K0 still returns the untouched native object.
 The paper's reported results are reference values, not guaranteed scores for
 this cohort or environment.

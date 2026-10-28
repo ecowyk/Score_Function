@@ -22,7 +22,7 @@ from flow_score.planner import (
     preflight_model, validated_config,
 )
 from test_urban_driver_score import ConstantScore, sample_inputs
-from urban_driver_score.geometry import sample_native
+from urban_driver_score.geometry import physical_to_poses, sample_native
 
 
 def model_config():
@@ -83,11 +83,11 @@ def native_output():
     return torch.as_tensor(poses)[None, None]
 
 
-def native_trajectory(current):
+def native_trajectory(current, output=None):
     native = object.__new__(OfficialFlowPlanner)
     native._future_horizon, native._step_interval = 8., .1
     return InterpolatedTrajectory(native.outputs_to_trajectory(
-        native_output(), current.history.ego_states))
+        native_output() if output is None else output, current.history.ego_states))
 
 
 class DummyModel(nn.Module):
@@ -288,15 +288,45 @@ class FlowScoreTests(unittest.TestCase):
                 patch("urban_driver_score.planner.sample_native", side_effect=AssertionError("K0 sampled")):
             self.assertIs(planner.compute_planner_trajectory(object()), sentinel)
 
-    def test_conversion_matches_official_80_poses_and_observed_t0_across_heading_wrap(self):
+    def test_identical_inputs_match_all_official_state_fields_across_heading_wrap(self):
+        current, _, _ = sample_inputs(heading=np.pi - .05)
+        for dtype in (torch.float32, torch.float64):
+            with self.subTest(dtype=dtype):
+                output = native_output().to(dtype)
+                native = native_trajectory(current, output)
+                # Production promotes to float64 before atan2, just like Flow's
+                # official outputs_to_trajectory. Compare identical inputs;
+                # this checks velocities/accelerations as well as poses/timing.
+                poses = physical_to_poses(output[0, 0].numpy())
+                rebuilt = self.planner()._trajectory_from_poses(poses, current)
+                got_states = rebuilt.get_sampled_trajectory()
+                expected_states = native.get_sampled_trajectory()
+                self.assertEqual(len(got_states), 81)
+                self.assertEqual(len(expected_states), 81)
+                self.assertIs(got_states[0], current.history.ego_states[-1])
+                for got, expected in zip(got_states, expected_states):
+                    self.assertEqual(got.time_us, expected.time_us)
+                    np.testing.assert_array_equal(list(got), list(expected))
+
+    def test_native_roundtrip_preserves_80_poses_and_observed_t0_across_heading_wrap(self):
         current, _, _ = sample_inputs(heading=np.pi - .05)
         native = native_trajectory(current)
         physical = sample_native(native, current.history.ego_states[-1])
-        np.testing.assert_allclose(physical, native_output()[0, 0].numpy(), atol=4e-6)
-        poses = np.column_stack((physical[:, :2], np.arctan2(physical[:, 3], physical[:, 2])))
+        np.testing.assert_allclose(physical, native_output()[0, 0].numpy(), rtol=0, atol=4e-6)
+        poses = physical_to_poses(physical)
         rebuilt = self.planner()._trajectory_from_poses(poses, current)
+        # Sampling for the score intentionally returns float32. At exactly pi,
+        # tiny quantization errors can select opposite equivalent heading signs.
+        # nuPlan interpolates those signed headings when projecting derivatives,
+        # so derived velocities need not survive this lossy roundtrip. Their
+        # official conversion is checked with identical inputs above instead.
         for got, expected in zip(rebuilt.get_sampled_trajectory(), native.get_sampled_trajectory()):
-            np.testing.assert_allclose(list(got), list(expected), atol=2e-5)
+            self.assertEqual(got.time_us, expected.time_us)
+            np.testing.assert_allclose(
+                [got.rear_axle.x, got.rear_axle.y],
+                [expected.rear_axle.x, expected.rear_axle.y], rtol=0, atol=4e-6)
+            angle_error = got.rear_axle.heading - expected.rear_axle.heading
+            self.assertLess(abs(np.arctan2(np.sin(angle_error), np.cos(angle_error))), 2e-7)
         ego = current.history.ego_states[-1]
         states = rebuilt.get_sampled_trajectory()
         self.assertEqual(len(states), 81)
