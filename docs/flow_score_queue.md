@@ -76,6 +76,33 @@ node; transitive dependencies use the configured pip index. Installed matching
 cu118 versions are reused on resume. The final CUDA inference check still runs.
 This changes the download route, not the Torch, torchvision or CUDA versions.
 
+If both PyTorch hosts time out, opt in to `FLOW_TORCH_CHANNEL=cu121-pypi`.
+This uses the configured company PyPI mirror for Torch 2.3.0, torchvision
+0.18.0 and their dependencies. These official Linux PyPI wheels use **CUDA
+12.1**, so this is a runtime change from the default cu118 setup. The script
+checks for Linux NVIDIA driver >=525.60.13 before changing packages, validates
+the two Python 3.9/x86-64 wheel SHA256 values against official PyPI metadata,
+and checks the actual CUDA version and full synthetic inference after install.
+It reuses the completed environment clone. It does not install a driver or
+system CUDA toolkit. The queue records the actual runtime in `protocol.json`
+and refuses to resume an existing run with a different runtime. Native and K20
+must use the same environment; numerical equality across CUDA builds is not
+assumed.
+
+```bash
+cd /home/data/wyk/Score_Function_FLOW_1028
+FLOW_TORCH_CHANNEL=cu121-pypi \
+PIP_INDEX_URL=http://mirrors.tools.huawei.com/pypi/simple/ \
+PIP_EXTRA_INDEX_URL= \
+PIP_TRUSTED_HOST=mirrors.tools.huawei.com \
+PIP_DEFAULT_TIMEOUT=120 \
+bash scripts/setup_flow_eval.sh
+```
+
+If the driver is older than the supported minimum, setup stops before package
+changes. Obtain the pinned cu118 wheels through an accessible machine instead
+of silently substituting CPU wheels or claiming CUDA 12.1 is compatible.
+
 ```bash
 cd /home/data/wyk
 git clone --single-branch --branch codex/flow-score-k20-1028 \

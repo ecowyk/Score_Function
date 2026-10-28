@@ -86,14 +86,17 @@ class FlowQueueTests(unittest.TestCase):
             for index in range(count):
                 (audits / f"{index}.json").write_text(json.dumps(audit))
 
-    def run_main(self, out, environment, simulation, native_metadata=None):
+    def run_main(self, out, environment, simulation, native_metadata=None, runtime=None):
         if native_metadata is None:
             native_metadata = {"strict": True}
+        if runtime is None:
+            runtime = {"torch": "2.3.0+cu118", "torchvision": "0.18.0+cu118", "cuda": "11.8"}
         with mock.patch.dict(os.environ, environment), \
                 mock.patch.object(sys, "argv", ["queue", "--output", str(out)]), \
                 mock.patch.object(queue, "verify_flow_source", return_value=queue.FLOW_COMMIT), \
                 mock.patch.object(queue.shared, "score_preflight"), \
                 mock.patch.object(queue, "native_preflight", return_value=native_metadata), \
+                mock.patch.object(queue, "runtime_metadata", return_value=runtime), \
                 mock.patch.object(queue.shared, "run_simulation", side_effect=simulation), \
                 contextlib.redirect_stdout(io.StringIO()):
             queue.main()
@@ -254,6 +257,20 @@ class FlowQueueTests(unittest.TestCase):
                     queue.subprocess, "check_output", side_effect=responses):
                 with self.assertRaisesRegex(ValueError, message):
                     queue.verify_flow_source(Path("/unused"))
+
+    def test_cuda_runtime_change_is_recorded_and_rejected_on_resume(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            exp, _, _, _, env = self.prepare(root)
+            out = exp / "flow_queue"
+            runtime = {"torch": "2.3.0+cu118", "torchvision": "0.18.0+cu118", "cuda": "11.8"}
+            self.run_main(out, env, self.complete, runtime=runtime)
+            self.assertEqual(json.loads((out / "protocol.json").read_text())["runtime"], runtime)
+            changed = {"torch": "2.3.0+cu121", "torchvision": "0.18.0+cu121", "cuda": "12.1"}
+            simulation = mock.Mock()
+            with self.assertRaisesRegex(ValueError, "Resume protocol changed"):
+                self.run_main(out, env, simulation, runtime=changed)
+            simulation.assert_not_called()
 
     def test_published_sampling_is_preserved_without_resolving_training_paths(self):
         with tempfile.TemporaryDirectory() as temporary:

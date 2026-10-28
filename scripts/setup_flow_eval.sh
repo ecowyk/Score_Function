@@ -12,6 +12,12 @@ FLOW_CHECKPOINT=$FLOW_ASSET_DIR/model.pth
 FLOW_MODEL_CONFIG=$FLOW_ASSET_DIR/model_config.yaml
 FLOW_COMMIT=366df7654d7b7fa77f9d2577279da63127c6d2f8
 NUPLAN_DEVKIT_ROOT=${NUPLAN_DEVKIT_ROOT:-$UD_ROOT/nuplan-devkit}
+export FLOW_TORCH_CHANNEL=${FLOW_TORCH_CHANNEL:-cu118}
+case "$FLOW_TORCH_CHANNEL" in
+  cu118) export FLOW_EXPECTED_CUDA=11.8 ;;
+  cu121-pypi) export FLOW_EXPECTED_CUDA=12.1 ;;
+  *) echo 'FLOW_TORCH_CHANNEL must be cu118 or cu121-pypi.' >&2; exit 1 ;;
+esac
 
 command -v conda >/dev/null
 test -x "$FLOW_BASE_ENV/bin/python"
@@ -61,34 +67,109 @@ else
 fi
 PYTHON="$FLOW_ENV/bin/python"
 
-echo '[3/5] Install official Torch 2.3.0 / CUDA 11.8 versions.'
+echo "[3/5] Install official Torch 2.3.0 / CUDA $FLOW_EXPECTED_CUDA ($FLOW_TORCH_CHANNEL)."
+if [[ "$FLOW_TORCH_CHANNEL" == cu121-pypi ]]; then
+  # PyPI's Linux wheels use CUDA 12.1. Check the node before replacing packages;
+  # no system CUDA toolkit or driver is installed/modified by this script.
+  "$PYTHON" - <<'PY'
+import platform
+import re
+import subprocess
+import sys
+
+if sys.version_info[:2] != (3, 9) or platform.system() != "Linux" or platform.machine() != "x86_64":
+    raise SystemExit("Pinned PyPI wheels require Python 3.9 / Linux x86_64")
+try:
+    output = subprocess.check_output(
+        ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+        text=True, timeout=15)
+except (OSError, subprocess.SubprocessError) as error:
+    raise SystemExit(f"Cannot verify NVIDIA driver for CUDA 12.1: {error}")
+drivers = sorted(set(output.split()))
+if not drivers or any(not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", v) for v in drivers):
+    raise SystemExit(f"Unrecognized NVIDIA driver output: {output!r}")
+for driver in drivers:
+    parts = tuple(map(int, driver.split(".")))
+    if (parts + (0,) * (3 - len(parts))) < (525, 60, 13):
+        raise SystemExit(f"Driver {driver} is too old for this CUDA 12.1 fallback; "
+                         "need >=525.60.13. Environment packages have not been changed. "
+                         "Keep CUDA 11.8 and obtain its wheels offline instead.")
+print("CUDA 12.1 minimum driver check passed:", ", ".join(drivers))
+PY
+fi
+FLOW_SETUP_TMP=$(mktemp -d)
+trap 'rm -rf -- "$FLOW_SETUP_TMP"' EXIT
 "$PYTHON" -m pip install 'pip==24.0' 'setuptools==69.5.1' 'wheel==0.43.0'
 # These extensions belong to the cloned older Torch installation. Flow does not
 # use either one, and keeping their incompatible binaries would be misleading.
 "$PYTHON" -m pip uninstall --yes natten torchaudio
-# Use exact official R2 release wheels with upstream hashes, bypassing the
-# index hostname that times out on the evaluation node. Other dependencies
-# use the configured pip index (the company mirror on that node).
+# Reuse only a pair that actually imports with the selected CUDA runtime.
 if "$PYTHON" - <<'PY'
-from importlib.metadata import PackageNotFoundError, version
+import os
 try:
-    ready = (version("torch") == "2.3.0+cu118"
-             and version("torchvision") == "0.18.0+cu118")
-except PackageNotFoundError:
+    import torch
+    import torchvision
+    suffix = "+cu" + os.environ["FLOW_EXPECTED_CUDA"].replace(".", "")
+    ready = (torch.__version__ == "2.3.0" + suffix
+             and torchvision.__version__ == "0.18.0" + suffix
+             and torch.version.cuda == os.environ["FLOW_EXPECTED_CUDA"])
+except Exception:
     ready = False
 raise SystemExit(0 if ready else 1)
 PY
 then
-  echo 'Matching Torch/torchvision cu118 packages found; reusing them.'
-else
+  echo "Matching Torch/torchvision CUDA $FLOW_EXPECTED_CUDA packages found; reusing them."
+elif [[ "$FLOW_TORCH_CHANNEL" == cu118 ]]; then
+  # Exact official R2 release wheels; dependencies use the configured pip index.
   "$PYTHON" -m pip install --upgrade --timeout 60 --retries 2 \
     'https://download-r2.pytorch.org/whl/cu118/torch-2.3.0%2Bcu118-cp39-cp39-linux_x86_64.whl#sha256=2c74bcc48e187153e56c9e3cb87c02831ee767630fd0a6c3d699063f12a2f471' \
     'https://download-r2.pytorch.org/whl/cu118/torchvision-0.18.0%2Bcu118-cp39-cp39-linux_x86_64.whl#sha256=dcc015a913a025d7b1ff43d444d2cba016e1c3a31f580fdeca20791025040fc6'
+else
+  # Use the configured PyPI mirror only. Exact public versions exclude +cu118
+  # builds; validate against upstream PyPI hashes before installing either wheel.
+  "$PYTHON" -m pip download --dest "$FLOW_SETUP_TMP" --no-deps --only-binary=:all: \
+    --timeout 60 --retries 2 'torch===2.3.0' 'torchvision===0.18.0'
+  "$PYTHON" - "$FLOW_SETUP_TMP" <<'PY'
+import hashlib
+from pathlib import Path
+import sys
+
+expected = {
+    "torch-2.3.0-cp39-cp39-manylinux1_x86_64.whl":
+        "cd0dc498b961ab19cb3f8dbf0c6c50e244f2f37dbfa05754ab44ea057c944ef9",
+    "torchvision-0.18.0-cp39-cp39-manylinux1_x86_64.whl":
+        "4c334b3e719ba0a9ba6e15d4aff1178f5e6d029174f346163fed525f0ccfffd3",
+}
+for name, checksum in expected.items():
+    path = Path(sys.argv[1]) / name
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    if digest.hexdigest() != checksum:
+        raise SystemExit(f"Official PyPI SHA256 mismatch: {name}")
+    print("Official PyPI wheel verified:", name)
+PY
+  # CUDA 11/12 pip packages can share paths (notably libcudnn.so.8). Remove
+  # overlapping old packages before installing the new dependencies, never after.
+  mapfile -t old_cuda_packages < <("$PYTHON" - <<'PY'
+from importlib.metadata import distributions
+names = sorted({d.metadata["Name"] for d in distributions()
+                if d.metadata["Name"] and d.metadata["Name"].startswith("nvidia-")})
+if any(name.endswith("-cu11") for name in names):
+    print("\n".join(name for name in names if name.endswith(("-cu11", "-cu12"))))
+PY
+  )
+  if ((${#old_cuda_packages[@]})); then
+    "$PYTHON" -m pip uninstall --yes "${old_cuda_packages[@]}"
+  fi
+  "$PYTHON" -m pip install --upgrade --timeout 60 --retries 2 \
+    "$FLOW_SETUP_TMP/torch-2.3.0-cp39-cp39-manylinux1_x86_64.whl" \
+    "$FLOW_SETUP_TMP/torchvision-0.18.0-cp39-cp39-manylinux1_x86_64.whl"
 fi
 
 echo '[4/5] Install pinned inference and frozen-score dependencies.'
-CONSTRAINTS=$(mktemp)
-trap 'rm -f "$CONSTRAINTS"' EXIT
+CONSTRAINTS="$FLOW_SETUP_TMP/constraints.txt"
 cat > "$CONSTRAINTS" <<'EOF'
 torch==2.3.0
 torchvision==0.18.0
@@ -128,8 +209,9 @@ import torch
 from flow_planner.data.dataset.nuplan import NuPlanDataSample
 from flow_score.planner import load_flow_model
 
-assert torch.__version__.startswith("2.3.0"), torch.__version__
-assert torch.version.cuda == "11.8", torch.version.cuda
+assert torch.__version__.split("+")[0] == "2.3.0", torch.__version__
+assert version("torchvision").split("+")[0] == "0.18.0", version("torchvision")
+assert torch.version.cuda == os.environ["FLOW_EXPECTED_CUDA"], torch.version.cuda
 assert torch.cuda.is_available(), "CUDA is unavailable in the Flow Planner environment"
 assert version("flow-matching") == "1.0.10", version("flow-matching")
 assert version("hydra-core") == "1.3.2", version("hydra-core")
@@ -168,6 +250,7 @@ torch.cuda.synchronize()
 assert tuple(output.shape) == (1, 1, 80, 4), output.shape
 assert torch.isfinite(output).all(), "Flow Planner returned nonfinite synthetic predictions"
 print("Flow Planner environment ready:", torch.__version__, "flow-matching", version("flow-matching"))
+print("Actual CUDA runtime:", torch.version.cuda, "cuDNN:", torch.backends.cudnn.version())
 print("Visible GPUs:", torch.cuda.device_count())
 print("Published weights loaded strictly; synthetic CUDA output:", tuple(output.shape))
 print("Native model source:", Path(__import__(type(model).__module__, fromlist=["x"]).__file__).resolve())

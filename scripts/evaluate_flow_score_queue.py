@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import platform
 import subprocess
 import sys
 
@@ -99,6 +100,37 @@ def native_preflight(config_path, checkpoint):
     return preflight_model(config_path, checkpoint)
 
 
+def runtime_metadata():
+    """Record the actual binary runtime, including the explicit cu121 fallback."""
+    import torch
+    import torchvision
+
+    if str(torch.__version__).split("+")[0] != "2.3.0":
+        raise ValueError(f"Flow evaluation requires Torch 2.3.0; found {torch.__version__}")
+    if str(torchvision.__version__).split("+")[0] != "0.18.0":
+        raise ValueError(f"Flow evaluation requires torchvision 0.18.0; found {torchvision.__version__}")
+    if torch.version.cuda not in ("11.8", "12.1") or not torch.cuda.is_available():
+        raise ValueError("Flow evaluation requires a working CUDA 11.8 or 12.1 Torch build")
+    try:
+        drivers = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            text=True, stderr=subprocess.DEVNULL, timeout=10)
+        driver_versions = sorted(set(line.strip() for line in drivers.splitlines() if line.strip()))
+    except (OSError, subprocess.SubprocessError):
+        driver_versions = None
+    return {
+        "python": platform.python_version(),
+        "torch": str(torch.__version__), "torchvision": str(torchvision.__version__),
+        "cuda": torch.version.cuda, "cudnn": torch.backends.cudnn.version(),
+        "nvidia_driver_versions": driver_versions,
+        "visible_gpus": [
+            {"name": torch.cuda.get_device_name(index),
+             "capability": list(torch.cuda.get_device_capability(index))}
+            for index in range(torch.cuda.device_count())
+        ],
+    }
+
+
 def verify_inputs(hashes, flow_code):
     verify_flow_source(flow_code)
     for path, expected in hashes.items():
@@ -145,6 +177,7 @@ def run_queue(args, root, exp, out):
     frozen_source = Path(os.environ["FROZEN_SCORE_CODE"]).resolve()
     commit = verify_flow_source(flow_code)
     sampling = load_flow_sampling(config_path)
+    runtime = runtime_metadata()
     shared.score_preflight(score_config, score_checkpoint, frozen_source)
     native_metadata = native_preflight(config_path, flow_checkpoint)
     print("Flow Planner published checkpoint loaded strictly; 4 midpoint ODE steps, "
@@ -184,6 +217,7 @@ def run_queue(args, root, exp, out):
         "flow_source": str(flow_code), "flow_commit": commit,
         "flow_config": str(config_path), "sampling": sampling,
         "native_metadata": native_metadata,
+        "runtime": runtime,
         "frozen_score_source": str(frozen_source), "hashes": hashes,
     }
     if previous is not None and previous != json.loads(json.dumps(protocol)):
