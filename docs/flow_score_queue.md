@@ -69,6 +69,13 @@ Python 3.9 PLUTO environment under `/home/data/wyk`. Setup clones PLUTO into
 pinned inference dependencies. The completed clone is reused on retry. Conda
 may spend several minutes copying files without progress output.
 
+Torch and torchvision use their exact official `download-r2.pytorch.org`
+Python 3.9/Linux x86-64 cu118 wheels with upstream SHA256 checks. This skips
+the `download.pytorch.org` index hostname that timed out on the evaluation
+node; transitive dependencies use the configured pip index. Installed matching
+cu118 versions are reused on resume. The final CUDA inference check still runs.
+This changes the download route, not the Torch, torchvision or CUDA versions.
+
 ```bash
 cd /home/data/wyk
 git clone --single-branch --branch codex/flow-score-k20-1028 \

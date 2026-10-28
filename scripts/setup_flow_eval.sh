@@ -66,8 +66,25 @@ echo '[3/5] Install official Torch 2.3.0 / CUDA 11.8 versions.'
 # These extensions belong to the cloned older Torch installation. Flow does not
 # use either one, and keeping their incompatible binaries would be misleading.
 "$PYTHON" -m pip uninstall --yes natten torchaudio
-"$PYTHON" -m pip install --upgrade 'torch==2.3.0' 'torchvision==0.18.0' \
-  --index-url https://download.pytorch.org/whl/cu118
+# Use exact official R2 release wheels with upstream hashes, bypassing the
+# index hostname that times out on the evaluation node. Other dependencies
+# use the configured pip index (the company mirror on that node).
+if "$PYTHON" - <<'PY'
+from importlib.metadata import PackageNotFoundError, version
+try:
+    ready = (version("torch") == "2.3.0+cu118"
+             and version("torchvision") == "0.18.0+cu118")
+except PackageNotFoundError:
+    ready = False
+raise SystemExit(0 if ready else 1)
+PY
+then
+  echo 'Matching Torch/torchvision cu118 packages found; reusing them.'
+else
+  "$PYTHON" -m pip install --upgrade --timeout 60 --retries 2 \
+    'https://download-r2.pytorch.org/whl/cu118/torch-2.3.0%2Bcu118-cp39-cp39-linux_x86_64.whl#sha256=2c74bcc48e187153e56c9e3cb87c02831ee767630fd0a6c3d699063f12a2f471' \
+    'https://download-r2.pytorch.org/whl/cu118/torchvision-0.18.0%2Bcu118-cp39-cp39-linux_x86_64.whl#sha256=dcc015a913a025d7b1ff43d444d2cba016e1c3a31f580fdeca20791025040fc6'
+fi
 
 echo '[4/5] Install pinned inference and frozen-score dependencies.'
 CONSTRAINTS=$(mktemp)
