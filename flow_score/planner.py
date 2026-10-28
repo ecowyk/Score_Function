@@ -8,6 +8,8 @@ after Ray assigns a GPU. Extra score work cannot advance the native RNG stream.
 import hashlib
 import json
 import logging
+import math
+from numbers import Real
 import random
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -63,7 +65,7 @@ def _validate_targets(value):
             _validate_targets(child)
 
 
-def validated_config(config_path, device="cuda"):
+def validated_config(config_path, device="cuda", *, cfg_weight=1.0):
     """Resolve only inference components, preserving published normalizers.
 
 The released YAML omits its training dataset subtree, although its state
@@ -74,6 +76,9 @@ deliberately never resolved. The downloaded file is never modified.
     device = str(torch.device(device))
     if device not in ("cpu", "cuda"):
         raise ValueError("Flow Planner device must be cpu or cuda")
+    if (isinstance(cfg_weight, bool) or not isinstance(cfg_weight, Real)
+            or not math.isfinite(cfg_weight) or cfg_weight not in (1.0, 1.8)):
+        raise ValueError("Flow CFG weight must be the explicit supported value 1.0 or 1.8")
     cfg = OmegaConf.load(config_path)
     if not OmegaConf.is_dict(cfg) or "model" not in cfg or "core" not in cfg:
         raise ValueError("Require the published Flow Planner model/core configuration")
@@ -127,6 +132,11 @@ deliberately never resolved. The downloaded file is never modified.
     # Explicitly carry the chosen device into every instantiated component.
     # For CUDA this is exactly the official default; CPU is useful for preflight.
     model["device"] = device
+    # Validate the unchanged published source configuration above before an
+    # explicit inference override. The official sampler reads its own stored
+    # coefficient; passing planner.cfg_weight alone does not change that value.
+    model["cfg_weight"] = float(cfg_weight)
+    model["flow_ode"]["cfg_weight"] = float(cfg_weight)
     return {"model": model, "core": core, "device": device}
 
 
@@ -140,9 +150,9 @@ def _checkpoint_state(checkpoint_path):
     return {key[len("module."):]: value for key, value in checkpoint.items()}
 
 
-def load_flow_model(config_path, checkpoint_path, device="cpu"):
+def load_flow_model(config_path, checkpoint_path, device="cpu", *, cfg_weight=1.0):
     """Strictly load published bare weights for CPU preflight or a GPU check."""
-    cfg = validated_config(config_path, device)
+    cfg = validated_config(config_path, device, cfg_weight=cfg_weight)
     if device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("Requested Flow Planner CUDA inference, but CUDA is unavailable")
     model = instantiate(OmegaConf.create(cfg["model"]))
@@ -159,6 +169,7 @@ def _protocol_metadata(cfg):
         "step_interval_s": .1, "past_pose_count": 20, "past_horizon_s": 2.,
         "checkpoint_format": "published_bare_module_state_dict", "enable_ema": False,
         "use_cfg": True, "cfg_weight": ode["cfg_weight"],
+        "source_cfg_weight": 1.0, "effective_cfg_weight": ode["cfg_weight"],
         "sample_steps": ode["sample_steps"], "sample_method": ode["sample_method"],
         "sample_temperature": ode["sample_temperature"],
         "assemble_method": cfg["model"]["assemble_method"],
@@ -174,11 +185,11 @@ def _protocol_metadata(cfg):
     }
 
 
-def preflight_model(config_path, checkpoint_path, device="cpu"):
+def preflight_model(config_path, checkpoint_path, device="cpu", *, cfg_weight=1.0):
     """Check real checkpoint compatibility without altering native RNG state."""
     with preserve_random_state(device):
-        cfg = validated_config(config_path, device)
-        model = load_flow_model(config_path, checkpoint_path, device)
+        cfg = validated_config(config_path, device, cfg_weight=cfg_weight)
+        model = load_flow_model(config_path, checkpoint_path, device, cfg_weight=cfg_weight)
         if any(not torch.isfinite(value).all() for value in model.state_dict().values()):
             raise ValueError("Published Flow checkpoint contains nonfinite weights")
         metadata = _protocol_metadata(cfg)
@@ -187,7 +198,7 @@ def preflight_model(config_path, checkpoint_path, device="cpu"):
         # Record the exact CUDA configuration separately rather than presenting
         # the CPU check configuration hash as the simulation configuration hash.
         metadata["canonical_cuda_effective_config_sha256"] = _protocol_metadata(
-            validated_config(config_path, "cuda"))["effective_inference_config_sha256"]
+            validated_config(config_path, "cuda", cfg_weight=cfg_weight))["effective_inference_config_sha256"]
         metadata["parameters"] = sum(parameter.numel() for parameter in model.parameters())
         del model
     return metadata
@@ -202,17 +213,18 @@ class FlowScorePlanner(UrbanDriverScorePlanner):
     def __init__(self, config_path, checkpoint_path, score_config="unused",
                  score_checkpoint="unused", steps=0, gamma=.1, sigma=.1,
                  heading_projection=True, audit_dir=None, device="cuda", native_device="cuda",
-                 evaluation_seed=0):
+                 evaluation_seed=0, cfg_weight=1.0):
         if native_device not in ("cpu", "cuda") or str(torch.device(device)) not in ("cpu", "cuda"):
             raise ValueError("Native and score devices must be cpu or cuda")
         if type(evaluation_seed) is not int or not 0 <= evaluation_seed < 2 ** 32:
             raise ValueError("evaluation_seed must be an integer in [0, 2**32)")
-        cfg = validated_config(config_path, native_device)
+        cfg = validated_config(config_path, native_device, cfg_weight=cfg_weight)
         super().__init__(cfg, checkpoint_path, score_config, score_checkpoint,
                          steps, gamma, sigma, heading_projection, audit_dir, device)
         self.config_path = str(config_path)
         self.native_device = native_device
         self.evaluation_seed = evaluation_seed
+        self.cfg_weight = cfg["model"]["cfg_weight"]
 
     def name(self):
         return "FlowPlanner_S10G_K20" if self.steps else "FlowPlanner"
@@ -242,7 +254,7 @@ class FlowScorePlanner(UrbanDriverScorePlanner):
                 config_path=str(effective_path), ckpt_path=self.checkpoint_path,
                 past_trajectory_sampling=TrajectorySampling(num_poses=20, time_horizon=2.),
                 future_trajectory_sampling=TrajectorySampling(num_poses=80, time_horizon=8.),
-                enable_ema=False, device=self.native_device, use_cfg=True, cfg_weight=1.,
+                enable_ema=False, device=self.native_device, use_cfg=True, cfg_weight=self.cfg_weight,
             )
         self._native.initialize(initialization)
         self._audited = False
@@ -269,8 +281,8 @@ class FlowScorePlanner(UrbanDriverScorePlanner):
             native_device=self.native_device, score_device=self.device,
             evaluation_seed=self.evaluation_seed, seed_policy=SEED_POLICY,
         )
-        LOG.info("Flow Planner ready: 80 poses, 4 midpoint steps, CFG=1; native %s, score %s, K20",
-                 self.native_device, self.device)
+        LOG.info("Flow Planner ready: 80 poses, 4 midpoint steps, CFG=%s; native %s, score %s, K20",
+                 self.cfg_weight, self.native_device, self.device)
 
     @torch.no_grad()
     def compute_planner_trajectory(self, current_input):

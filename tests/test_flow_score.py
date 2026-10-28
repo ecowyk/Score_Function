@@ -13,6 +13,7 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 from torch import nn
+from hydra.utils import instantiate
 
 from flow_planner.planner import FlowPlanner as OfficialFlowPlanner
 from nuplan.planning.simulation.trajectory.interpolated_trajectory import InterpolatedTrajectory
@@ -41,7 +42,7 @@ def model_config():
                 "path": {"_target_": "flow_matching.path.affine.AffineProbPath",
                          "scheduler": {"_target_": "flow_matching.path.scheduler.CondOTScheduler"}},
                 "time_sampler": {"_target_": "flow_planner.model.model_utils.time_sampler.TimeSampler",
-                                 "device": "${device}"},
+                                 "device": "${device}", "eps": .001},
             },
             "obs_normalizer": {
                 "_target_": "flow_planner.data.normalization.obs_normalize.ObservationNormalizer",
@@ -144,14 +145,63 @@ class FlowScoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.planner()
 
+    def test_explicit_cfg_override_reaches_the_official_velocity_model(self):
+        before = self.config_path.read_bytes()
+        cfg = validated_config(self.config_path, "cpu", cfg_weight=1.8)
+        self.assertEqual(cfg["model"]["cfg_weight"], 1.8)
+        ode = instantiate(OmegaConf.create(cfg["model"]["flow_ode"]))
+        self.assertEqual(ode.cfg_weight, 1.8)
+
+        def decoder(x, t, **extras):
+            prediction = torch.zeros_like(x)
+            prediction[:x.shape[0] // 2] = 2.0
+            return prediction
+
+        # Exercise the real FlowODE->VelocityModel construction. The caller's
+        # cfg_weight is only forwarded to the decoder in the official code;
+        # the sampler's stored coefficient must be changed as well.
+        target = "flow_planner.model.flow_planner_model.flow_utils.flow_ode.ODESolver"
+        with patch(target) as solver:
+            solver.return_value.sample.side_effect = lambda x_init, **kwargs: x_init
+            ode.generate(torch.zeros(1, 1, 1, 4), decoder, "x_start", use_cfg=True, cfg_weight=1.0)
+        velocity_model = solver.call_args.kwargs["velocity_model"]
+        self.assertEqual(velocity_model.cfg_weight, 1.8)
+        velocity = velocity_model(torch.zeros(1, 1, 1, 4), torch.tensor(0.0), cfg_weight=1.0)
+        torch.testing.assert_close(velocity, torch.full_like(velocity, 3.6))
+        self.assertEqual(self.config_path.read_bytes(), before)
+        self.assertEqual(self.planner().cfg_weight, 1.0)
+
+        events = []
+        class Native:
+            def __init__(self, **kwargs):
+                effective = OmegaConf.load(kwargs["config_path"])
+                events.append((kwargs["cfg_weight"], effective.model.cfg_weight,
+                               effective.model.flow_ode.cfg_weight))
+            def initialize(self, initialization):
+                pass
+        with patch("flow_planner.planner.FlowPlanner", Native):
+            self.planner(cfg_weight=1.8).initialize(SimpleNamespace(map_api=None, route_roadblock_ids=[]))
+        self.assertEqual(events, [(1.8, 1.8, 1.8)])
+        for invalid in (0.0, 1.2, 2.0, True, False, float("nan"), float("inf"), "1.8", None):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.planner(cfg_weight=invalid)
+        changed_source = model_config()
+        changed_source["model"]["cfg_weight"] = 1.8
+        self.write_config(changed_source)
+        with self.assertRaises(ValueError):
+            self.planner(cfg_weight=1.8)
+
     def test_published_bare_checkpoint_load_is_strict_cpu_and_rng_preserved(self):
         checkpoint = Path(self.temporary.name) / "model.pth"
         saved = {"module." + key: torch.full_like(value, .25)
                  for key, value in DummyModel().state_dict().items()}
         torch.save(saved, checkpoint)
+        instantiated_weights = []
         def instantiate_cpu(cfg):
             self.assertEqual(cfg.device, "cpu")
             self.assertEqual(cfg.flow_ode.time_sampler.device, "cpu")
+            self.assertEqual(cfg.cfg_weight, cfg.flow_ode.cfg_weight)
+            instantiated_weights.append(cfg.flow_ode.cfg_weight)
             return DummyModel()
         with patch("flow_score.planner.instantiate", instantiate_cpu), \
                 patch("torch.cuda.is_available", return_value=True):
@@ -174,6 +224,15 @@ class FlowScoreTests(unittest.TestCase):
             self.assertEqual(metadata["effective_config_device"], "cpu")
             self.assertNotEqual(metadata["effective_inference_config_sha256"],
                                 metadata["canonical_cuda_effective_config_sha256"])
+            guided_metadata = preflight_model(self.config_path, checkpoint, cfg_weight=1.8)
+            self.assertEqual(instantiated_weights, [1.0, 1.0, 1.8])
+            self.assertEqual(guided_metadata["source_cfg_weight"], 1.0)
+            self.assertEqual(guided_metadata["effective_cfg_weight"], 1.8)
+            self.assertEqual(guided_metadata["cfg_weight"], 1.8)
+            self.assertNotEqual(metadata["effective_inference_config_sha256"],
+                                guided_metadata["effective_inference_config_sha256"])
+            self.assertNotEqual(metadata["canonical_cuda_effective_config_sha256"],
+                                guided_metadata["canonical_cuda_effective_config_sha256"])
             json.dumps(metadata)
             broken = dict(saved)
             broken.pop(next(iter(broken)))

@@ -38,7 +38,7 @@ def verify_flow_source(directory):
     return commit
 
 
-def load_flow_sampling(config_path):
+def load_flow_sampling(config_path, cfg_weight=1.0):
     """Read inference fields without resolving unrelated training/env references."""
     config = OmegaConf.load(config_path)
     if OmegaConf.select(config, "model._target_") != MODEL_TARGET:
@@ -58,10 +58,15 @@ def load_flow_sampling(config_path):
     }
     if sampling != expected:
         raise ValueError(f"Require the published Flow sampling configuration {expected}; found {sampling}")
+    if type(cfg_weight) not in (int, float) or cfg_weight not in (1.0, 1.8):
+        raise ValueError("CFG weight must be published-default 1.0 or official-source 1.8")
+    sampling["source_cfg_weight"] = sampling["cfg_weight"]
+    sampling["cfg_weight"] = float(cfg_weight)
     return sampling
 
 
-def make_config(base, config_path, checkpoint, out, keys, steps, score_config, score_checkpoint):
+def make_config(base, config_path, checkpoint, out, keys, steps, score_config, score_checkpoint,
+                cfg_weight=1.0):
     if steps not in (0, 20):
         raise ValueError("This queue fixes K=0 and K=20")
     cfg = shared.execution_config(base, out, 8)
@@ -75,6 +80,7 @@ def make_config(base, config_path, checkpoint, out, keys, steps, score_config, s
         "score_checkpoint": str(score_checkpoint) if steps else "unused",
         "steps": steps, "gamma": .1, "sigma": .1, "heading_projection": True,
         "evaluation_seed": base["seed"],
+        "cfg_weight": cfg_weight,
         "device": "cuda", "native_device": "cuda",
         "audit_dir": str(out / "refinement_audit") if steps else None,
     }}
@@ -95,9 +101,19 @@ def make_smoke_config(cfg, out, keys):
     return cfg
 
 
-def native_preflight(config_path, checkpoint):
+def native_preflight(config_path, checkpoint, cfg_weight=1.0):
     from flow_score.planner import preflight_model
-    return preflight_model(config_path, checkpoint)
+    return preflight_model(config_path, checkpoint, cfg_weight=cfg_weight)
+
+
+def verify_official_cohort(flow_code, keys):
+    path = flow_code / "flow_planner/nuplan_simulation/scenario_filter/test14-hard.yaml"
+    official = OmegaConf.load(path)
+    tokens = [str(token) for token in official.scenario_tokens]
+    actual = [token for _, token in keys]
+    if len(tokens) != 272 or len(set(tokens)) != 272 or sorted(actual) != sorted(tokens):
+        raise ValueError("Reference scenario tokens differ from official Flow test14-hard")
+    return {"file": str(path), "sha256": shared.file_hash(path), "tokens_matched": 272}
 
 
 def runtime_metadata():
@@ -168,7 +184,8 @@ def run_stage(cfg, directory, keys, entry, environment, hashes, flow_code):
 
 
 def run_queue(args, root, exp, out):
-    shared.write_json(out / "process.json", {"pid": os.getpid(), "output": str(out)})
+    shared.write_json(out / "process.json", {"pid": os.getpid(), "output": str(out),
+                                           "native_only": args.native_only})
     flow_code = Path(os.environ["FLOW_CODE"]).resolve()
     flow_checkpoint = Path(os.environ["FLOW_CHECKPOINT"]).resolve()
     config_path = Path(os.environ["FLOW_CONFIG"]).resolve()
@@ -176,12 +193,14 @@ def run_queue(args, root, exp, out):
     score_checkpoint = Path(os.environ["SCORE_CHECKPOINT"]).resolve()
     frozen_source = Path(os.environ["FROZEN_SCORE_CODE"]).resolve()
     commit = verify_flow_source(flow_code)
-    sampling = load_flow_sampling(config_path)
+    sampling = load_flow_sampling(config_path, args.cfg_weight)
     runtime = runtime_metadata()
-    shared.score_preflight(score_config, score_checkpoint, frozen_source)
-    native_metadata = native_preflight(config_path, flow_checkpoint)
+    if not args.native_only:
+        shared.score_preflight(score_config, score_checkpoint, frozen_source)
+    native_metadata = native_preflight(config_path, flow_checkpoint, args.cfg_weight)
     print("Flow Planner published checkpoint loaded strictly; 4 midpoint ODE steps, "
-          "temperature=1, CFG weight=1; no rule post-processing; S10-G K=20 is separate", flush=True)
+          f"temperature=1, effective CFG weight={args.cfg_weight:g}; "
+          "no rule post-processing; S10-G K=20 is separate", flush=True)
 
     protocol_path = out / "protocol.json"
     previous = json.loads(protocol_path.read_text()) if protocol_path.exists() else None
@@ -195,6 +214,7 @@ def run_queue(args, root, exp, out):
             exp / "exp/simulation/closed_loop_nonreactive_agents/urbandriver/test14-hard",
             "raw_8gpu_*")
     base, _, keys, urban_score = shared.read_result(baseline, 272)
+    official_cohort = verify_official_cohort(flow_code, keys)
     if not str(base["observation"]["_target_"]).endswith(".TracksObservation"):
         raise ValueError("Reference must be the completed nonreactive UrbanDriver evaluation")
     expected_data = (root / "dataset/nuplan/nuplan-v1.1/test").resolve()
@@ -216,6 +236,7 @@ def run_queue(args, root, exp, out):
         "generation": "official_flow_matching", "rule_postprocessing": False,
         "flow_source": str(flow_code), "flow_commit": commit,
         "flow_config": str(config_path), "sampling": sampling,
+        "official_cohort": official_cohort,
         "native_metadata": native_metadata,
         "runtime": runtime,
         "frozen_score_source": str(frozen_source), "hashes": hashes,
@@ -227,9 +248,9 @@ def run_queue(args, root, exp, out):
     model_out = out / VARIANT
     raw_dir, refined_dir = model_out / "raw", model_out / "S10G_K20"
     raw_cfg = make_config(base, config_path, flow_checkpoint, raw_dir, keys, 0,
-                          score_config, score_checkpoint)
+                          score_config, score_checkpoint, args.cfg_weight)
     refined_cfg = make_config(base, config_path, flow_checkpoint, refined_dir, keys, 20,
-                              score_config, score_checkpoint)
+                              score_config, score_checkpoint, args.cfg_weight)
     environment = os.environ.copy()
     environment.update(OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1",
                        NODE_RANK="0", NUM_NODES="1")
@@ -242,11 +263,25 @@ def run_queue(args, root, exp, out):
     smoke_environment = environment.copy()
     smoke_environment["CUDA_VISIBLE_DEVICES"] = environment.get(
         "CUDA_VISIBLE_DEVICES", "0").split(",")[0]
-    for name, cfg in (("K0_smoke", raw_cfg), ("K20_smoke", refined_cfg)):
+    smokes = [("K0_smoke", raw_cfg)]
+    if not args.native_only:
+        smokes.append(("K20_smoke", refined_cfg))
+    for name, cfg in smokes:
         directory = model_out / name
         smoke_cfg = make_smoke_config(cfg, directory, keys)
         run_stage(smoke_cfg, directory, keys[:1], entry, smoke_environment, hashes, flow_code)
     native = run_stage(raw_cfg, raw_dir, keys, entry, environment, hashes, flow_code)
+    native_summary = {
+        "variant": VARIANT, "raw_100": native[3], "scenarios": len(keys),
+        "raw_dir": str(raw_dir), "cfg_weight": args.cfg_weight,
+        "paper_test14_hard_NR_reference_100": 76.47,
+        "difference_from_paper_100": native[3] - 76.47,
+        "paper_reproduction_confirmed": False,
+    }
+    shared.write_json(out / "native_summary.json", native_summary)
+    if args.native_only:
+        print("NATIVE ONLY COMPLETE " + json.dumps(native_summary), flush=True)
+        return
     refined = run_stage(refined_cfg, refined_dir, keys, entry, environment, hashes, flow_code)
 
     paired = native[1][["log_name", "scenario", "score"]].merge(
@@ -271,6 +306,11 @@ def run_queue(args, root, exp, out):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--cfg-weight", type=float, choices=(1.0, 1.8), default=1.0)
+    parser.add_argument("--native-only", action="store_true",
+                        help="Stop after Native; no score preflight, K20 smoke or K20 evaluation")
+    parser.add_argument("--wait-for-idle", action="store_true",
+                        help="Wait for an existing Flow queue before allocating GPUs")
     args = parser.parse_args()
     root = Path(os.environ.get("UD_ROOT", "/home/data/wyk")).resolve()
     exp = Path(os.environ["NUPLAN_EXP_ROOT"]).resolve()
@@ -280,7 +320,10 @@ def main():
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise RuntimeError("A Flow Planner score queue is already active; inspect its queue.log")
+            if not args.wait_for_idle:
+                raise RuntimeError("A Flow Planner score queue is already active; inspect its queue.log")
+            print("WAIT: another Flow queue is active; waiting for its lock before GPU work", flush=True)
+            fcntl.flock(lock, fcntl.LOCK_EX)
         marker = exp / "flow_score_queue_latest.txt"
         temporary = marker.with_suffix(".tmp")
         temporary.write_text(str(out) + "\n")

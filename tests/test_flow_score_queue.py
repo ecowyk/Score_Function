@@ -40,6 +40,10 @@ class FlowQueueTests(unittest.TestCase):
         OmegaConf.save(OmegaConf.create(cfg), baseline / "code/hydra/config.yaml")
         code = root / "Flow-Planner"
         code.mkdir()
+        official_filter = code / "flow_planner/nuplan_simulation/scenario_filter/test14-hard.yaml"
+        official_filter.parent.mkdir(parents=True)
+        OmegaConf.save(OmegaConf.create({"scenario_tokens": [token for _, token in keys]}),
+                       official_filter)
         model = {
             "_target_": queue.MODEL_TARGET, "future_len": 80, "state_dim": 4,
             "model_type": "x_start", "cfg_weight": 1.0,
@@ -86,20 +90,21 @@ class FlowQueueTests(unittest.TestCase):
             for index in range(count):
                 (audits / f"{index}.json").write_text(json.dumps(audit))
 
-    def run_main(self, out, environment, simulation, native_metadata=None, runtime=None):
+    def run_main(self, out, environment, simulation, native_metadata=None, runtime=None, cli_args=()):
         if native_metadata is None:
             native_metadata = {"strict": True}
         if runtime is None:
             runtime = {"torch": "2.3.0+cu118", "torchvision": "0.18.0+cu118", "cuda": "11.8"}
         with mock.patch.dict(os.environ, environment), \
-                mock.patch.object(sys, "argv", ["queue", "--output", str(out)]), \
+                mock.patch.object(sys, "argv", ["queue", "--output", str(out), *cli_args]), \
                 mock.patch.object(queue, "verify_flow_source", return_value=queue.FLOW_COMMIT), \
-                mock.patch.object(queue.shared, "score_preflight"), \
+                mock.patch.object(queue.shared, "score_preflight") as score_check, \
                 mock.patch.object(queue, "native_preflight", return_value=native_metadata), \
                 mock.patch.object(queue, "runtime_metadata", return_value=runtime), \
                 mock.patch.object(queue.shared, "run_simulation", side_effect=simulation), \
                 contextlib.redirect_stdout(io.StringIO()):
             queue.main()
+        return score_check
 
     def test_native_and_refined_configs_preserve_the_official_model_and_evaluation(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -178,6 +183,47 @@ class FlowQueueTests(unittest.TestCase):
                 self.run_main(out, env, simulation)
             self.assertEqual(calls, ["K0_smoke"])
             self.assertFalse((out / "summary.json").exists())
+
+    def test_cfg18_native_only_skips_score_and_can_continue_paired_with_same_cfg(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            exp, _, _, _, env = self.prepare(root)
+            out, calls = exp / "flow_cfg18", []
+            def simulation(cfg, directory, entry, environment):
+                calls.append(directory.name)
+                self.assertEqual(cfg["planner"]["flow_score"]["cfg_weight"], 1.8)
+                self.complete(cfg, directory, entry, environment)
+            score_check = self.run_main(out, env, simulation,
+                                       cli_args=("--native-only", "--cfg-weight", "1.8"))
+            score_check.assert_not_called()
+            self.assertEqual(calls, ["K0_smoke", "raw"])
+            self.assertFalse((out / "summary.json").exists())
+            summary = json.loads((out / "native_summary.json").read_text())
+            self.assertEqual(summary["cfg_weight"], 1.8)
+            self.assertEqual(summary["scenarios"], 272)
+            protocol = json.loads((out / "protocol.json").read_text())
+            self.assertEqual(protocol["sampling"]["source_cfg_weight"], 1.0)
+            self.assertEqual(protocol["sampling"]["cfg_weight"], 1.8)
+            self.assertEqual(protocol["official_cohort"]["tokens_matched"], 272)
+            calls.clear()
+            with self.assertRaisesRegex(ValueError, "Resume protocol changed"):
+                self.run_main(out, env, simulation, cli_args=("--native-only",))
+            self.assertEqual(calls, [])
+            self.run_main(out, env, simulation, cli_args=("--cfg-weight", "1.8"))
+            self.assertEqual(calls, ["K20_smoke", "S10G_K20"])
+
+    def test_same_count_but_different_official_tokens_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            exp, _, _, _, env = self.prepare(root)
+            path = Path(env["FLOW_CODE"]) / "flow_planner/nuplan_simulation/scenario_filter/test14-hard.yaml"
+            cfg = OmegaConf.load(path)
+            cfg.scenario_tokens[0] = "ffffffffffffffff"
+            OmegaConf.save(cfg, path)
+            simulation = mock.Mock()
+            with self.assertRaisesRegex(ValueError, "official Flow test14-hard"):
+                self.run_main(exp / "bad_cohort", env, simulation)
+            simulation.assert_not_called()
 
     def test_invalid_score_audit_stops_before_expensive_full_runs(self):
         with tempfile.TemporaryDirectory() as temporary:

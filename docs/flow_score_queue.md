@@ -38,10 +38,19 @@ subtrees are resolved; training recorder and environment references are unused.
 The protocol records these defaults and a digest of the effective config.
 
 Native behavior follows the released YAML: `x_start`, four midpoint steps,
-temperature 1, CFG weight 1, average assembly, 80 rear-axle-relative poses over
-8 seconds. Keep the released CFG value 1 rather than the repository training
-default 1.8. Official preprocessing, normalization, model, inference core and
-nuPlan conversion are retained, with no extra rule postprocessor.
+temperature 1, average assembly, 80 rear-axle-relative poses over 8 seconds.
+The published YAML sets CFG weight 1 (`disabled by default`), whereas the
+repository model YAML sets 1.8. The initial integration froze 1.0 without
+reconciling this difference with the paper. That run must be labeled CFG=1.0,
+not a confirmed reproduction of the paper's 76.47 Test14-hard NR result.
+The paper's Table 6 reports its main Val14 score at CFG=1.8. The explicit
+`FLOW_CFG_WEIGHT=1.8` option now changes both effective `model.cfg_weight` and
+`model.flow_ode.cfg_weight` after validating the original published file.
+Changing only the planner keyword is insufficient: the official FlowODE uses
+its instantiated coefficient. Source/effective weights and config hashes are
+recorded separately; downloaded files and official source remain unchanged.
+Official preprocessing, normalization, model, inference core and nuPlan
+conversion are retained, with no extra rule postprocessor.
 
 ## Refinement and comparison
 
@@ -54,12 +63,49 @@ once from the inherited reference evaluation seed, before constructing the
 native model. This makes raw/K20 sampling independent of Ray worker scheduling;
 the seed is not reset per frame. Additional score loading and refinement
 preserve RNG state, so they do not advance Flow's native sampling stream.
+This per-scenario seed policy is an explicit paired-evaluation choice, not
+something guaranteed by the official launch script. The paper does not
+disclose its exact evaluation seed/repetition policy.
 
 Both paths use the same nuPlan conversion, including the observed ego state at
 t=0 and 80 future states at t=0.1..8 seconds. The completed UrbanDriver result
 supplies the exact 272 hard14 nonreactive scenario identities, seed, controller
 and official metric settings. Full evaluations run eight workers with one GPU
 and two CPUs per simulation. Flow and the score both use CUDA.
+The queue additionally requires the exact 272 tokens from the pinned official
+Flow `test14-hard.yaml`; a matching count alone is insufficient.
+
+## Check the Native discrepancy before running more K20
+
+The observed CFG=1.0 Native score is 72.8647, versus the paper's 76.47. The CFG
+discrepancy warrants an independently labeled CFG=1.8 Native run, but does not
+prove it explains the full difference. Do not sweep test-set settings to chase
+76.47 or combine a CFG=1.0 Native result with CFG=1.8 K20.
+
+Use the separate `codex/flow-cfg18-repro-1028` code checkout while an earlier
+queue is running. Reuse the existing environment, checkpoint and dataset;
+setup does not need to run again. First audit the old completed Native:
+
+```bash
+/home/data/wyk/envs/flow_planner/bin/python scripts/audit_flow_native_protocol.py
+```
+
+This read-only JSON report compares actual scenario identities, filters, model
+configuration, asset hashes and recorded settings. It reports controllers and
+metric configuration for review; it is not a certification that the paper's
+full protocol has been reproduced.
+
+For the new queue, set `FLOW_CFG_WEIGHT=1.8`, `FLOW_NATIVE_ONLY=1` and
+`FLOW_WAIT_FOR_IDLE=1` before running the usual launcher. It waits for any
+existing Flow queue's lock before allocating GPUs, runs K0 smoke then the full
+eight-GPU Native evaluation, and writes `native_summary.json`. It does not
+load the score model, run K20 smoke or run full K20. Success ends with
+`NATIVE ONLY COMPLETE`. A new output directory is required for the new CFG.
+After reviewing this Native result, the same queue can continue with
+`FLOW_NATIVE_ONLY=0` and the same CFG/environment; completed Native is reused.
+
+Sources: [official source](https://github.com/DiffusionAD/Flow-Planner),
+[paper sections 4.1 and 4.3 / Table 6](https://arxiv.org/html/2510.11083v1).
 
 ## Setup on the evaluation node
 

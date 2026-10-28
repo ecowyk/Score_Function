@@ -27,4 +27,7 @@ test -s "$FROZEN_SCORE_CODE/score_function/model/refinement.py"
 CUDA_VISIBLE_DEVICES="" "$PYTHON" "$CODE_ROOT/tests/test_flow_score.py"
 CUDA_VISIBLE_DEVICES="" "$PYTHON" "$CODE_ROOT/tests/test_native_score_metrics.py"
 QUEUE_ROOT=${QUEUE_ROOT:-$NUPLAN_EXP_ROOT/flow_score_queue_$(date +%Y%m%d_%H%M%S)}
-exec "$PYTHON" -u "$CODE_ROOT/scripts/evaluate_flow_score_queue.py" --output "$QUEUE_ROOT"
+queue_args=(--output "$QUEUE_ROOT" --cfg-weight "${FLOW_CFG_WEIGHT:-1.0}")
+if [[ "${FLOW_NATIVE_ONLY:-0}" == 1 ]]; then queue_args+=(--native-only); fi
+if [[ "${FLOW_WAIT_FOR_IDLE:-0}" == 1 ]]; then queue_args+=(--wait-for-idle); fi
+exec "$PYTHON" -u "$CODE_ROOT/scripts/evaluate_flow_score_queue.py" "${queue_args[@]}"
