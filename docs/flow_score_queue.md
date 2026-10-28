@@ -90,6 +90,21 @@ Defaults can be overridden using `FLOW_BASE_ENV`, `FLOW_ENV`, `FLOW_CODE` and
 `FLOW_ASSET_DIR`. For launch, use `PYTHON` to select a custom environment and
 `FLOW_CHECKPOINT`/`FLOW_CONFIG` to select assets in a custom directory.
 
+If the node cannot connect to either Hugging Face or HF-Mirror, the dated
+`scripts/download_flow_cdn_1028.py` recovery helper downloads the identical model
+directly from its official CDN and reconstructs the byte-identical configuration
+from an embedded copy. It verifies the same sizes and SHA256 values before
+publishing either file. This emergency URL expires at 2026-10-28 09:01:35 UTC;
+it is not a permanent mirror and is not used by normal setup. Existing correct
+assets remain reusable after expiry. The helper checks TLS normally and retries
+with certificate verification disabled only after curl reports certificate
+error 60; pinned file hashes remain mandatory.
+
+Alternatively, copy the two unchanged files from a connected machine into
+`/home/data/wyk/Flow-Planner/checkpoints`, then rerun setup. When both files match
+the pinned hashes, setup skips the download entirely. Do not keep retrying
+certificate options for a TCP connection timeout.
+
 ## Start native then K20 automatically
 
 ```bash
