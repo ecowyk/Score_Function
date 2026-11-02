@@ -1,0 +1,22 @@
+record_id,benchmark,split,challenge,planner,baseline_checkpoint,refiner,score_checkpoint,score_epoch,seed,K,gamma,sigma,flow_cfg,score_100,expected_scenarios,completed_scenarios,pair_id,reported_state,evidence_level,source_id,code_commit,run_path,notes
+G00,nuPlan,test14-hard_NR,NR,DiffusionPlanner,,,,,,0,,,,75.5216,,,G_sigma_1014,complete,user_reported,U02,,,
+G01,nuPlan,test14-hard_NR,NR,DiffusionPlanner,,S05-G,,529,,20,0.1,0.05,,76.9929,,,G_sigma_1014,complete,user_reported,U02,,,
+G02,nuPlan,test14-hard_NR,NR,DiffusionPlanner,,S05-G_plus100,,629,,20,0.1,0.05,,76.7071,,,G_sigma_1014,complete,user_reported,U02,,,
+G03,nuPlan,test14-hard_NR,NR,DiffusionPlanner,,S10-G,,529,,20,0.1,0.1,,77.1190,,,G_sigma_1014,complete,user_reported,U02,,,
+B010,nuPlan,test14-hard_NR,NR,UrbanDriver,,,,,,0,,,,43.8898,,,hard_NR_UrbanDriver_reported,complete,user_reported,U04,,,Seed/checkpoint/run metadata not retrieved; do not infer from later defaults.
+B011,nuPlan,test14-hard_NR,NR,UrbanDriver,,S10-G,,529,,20,0.1,0.1,,57.0641,,,hard_NR_UrbanDriver_reported,complete,user_reported,U04,,,Seed/checkpoint/run metadata not retrieved; do not infer from later defaults.
+B020,nuPlan,test14-hard_NR,NR,PlanTF_epoch17,,,,,,0,,,,66.3397,,,hard_NR_PlanTF_epoch17_reported,complete,user_reported,U04,,,Seed/checkpoint/run metadata not retrieved; do not infer from later defaults.
+B021,nuPlan,test14-hard_NR,NR,PlanTF_epoch17,,S10-G,,529,,20,0.1,0.1,,76.2156,,,hard_NR_PlanTF_epoch17_reported,complete,user_reported,U04,,,Seed/checkpoint/run metadata not retrieved; do not infer from later defaults.
+B030,nuPlan,test14-hard_NR,NR,PlanTF_epoch24,,,,,,0,,,,69.4599,,,hard_NR_PlanTF_epoch24_reported,complete,user_reported,U04,,,Seed/checkpoint/run metadata not retrieved; do not infer from later defaults.
+B031,nuPlan,test14-hard_NR,NR,PlanTF_epoch24,,S10-G,,529,,20,0.1,0.1,,77.5052,,,hard_NR_PlanTF_epoch24_reported,complete,user_reported,U04,,,Seed/checkpoint/run metadata not retrieved; do not infer from later defaults.
+B040,nuPlan,test14-hard_NR,NR,PDM-Open,,,,,,0,,,,33.5111,,,hard_NR_PDM-Open_reported,complete,user_reported,U04,,,Seed/checkpoint/run metadata not retrieved; do not infer from later defaults.
+B041,nuPlan,test14-hard_NR,NR,PDM-Open,,S10-G,,529,,20,0.1,0.1,,49.6967,,,hard_NR_PDM-Open_reported,complete,user_reported,U04,,,Seed/checkpoint/run metadata not retrieved; do not infer from later defaults.
+B050,nuPlan,test14-hard_NR,NR,GC-PGP,,,,,,0,,,,46.7213,,,hard_NR_GC-PGP_reported,complete,user_reported,U04,,,Seed/checkpoint/run metadata not retrieved; do not infer from later defaults.
+B051,nuPlan,test14-hard_NR,NR,GC-PGP,,S10-G,,529,,20,0.1,0.1,,43.4881,,,hard_NR_GC-PGP_reported,complete,user_reported,U04,,,Seed/checkpoint/run metadata not retrieved; do not infer from later defaults.
+B060,nuPlan,test14-hard_NR,NR,PLUTO_wo_refine,,,,,,0,,,,73.6199,,,hard_NR_PLUTO_wo_refine_reported,complete,user_reported,U04,,,"Seed/checkpoint/run metadata not retrieved; do not infer from later defaults. Reported improved=102,worsened=104,tied=66."
+B061,nuPlan,test14-hard_NR,NR,PLUTO_wo_refine,,S10-G,,529,,20,0.1,0.1,,76.9245,,,hard_NR_PLUTO_wo_refine_reported,complete,user_reported,U04,,,"Seed/checkpoint/run metadata not retrieved; do not infer from later defaults. Reported improved=102,worsened=104,tied=66."
+R010,nuPlan,test14-hard_R,R,DiffusionPlanner,,,,,,0,,,,68.9747,,,R01,complete,user_reported,U04,,,
+R011,nuPlan,test14-hard_R,R,DiffusionPlanner,,S10-G,,529,,20,0.1,0.1,,68.6230,,,R01,complete,user_reported,U04,,,
+R020,nuPlan,test14-random_R,R,DiffusionPlanner,,,,,,0,,,,82.9723,,,R02,complete,user_reported,U04,,,
+R021,nuPlan,test14-random_R,R,DiffusionPlanner,,S10-G,,529,,20,0.1,0.1,,83.4659,,,R02,complete,user_reported,U04,,,
+F010,nuPlan,test14-hard_NR,NR,FlowPlanner,,,,,,0,,,1.0,72.8647,272,272,,complete,user_reported,S06,,,Old CFG1.0 run; protocol documentation corroborates; not a paired baseline for CFG1.8 K20.

@@ -1,0 +1,70 @@
+{
+  "snapshot_date": "2026-11-02",
+  "timezone": "Asia/Shanghai",
+  "scope": "source snapshots only; no server execution asserted",
+  "files": [
+    {
+      "path": "baselines8_v4/flow_score_cfg18/__init__.py",
+      "source_name": "baselines8_flowcfg18_seed20260922_1028_v4.tar.gz",
+      "source_id": "S07",
+      "size_bytes": 95,
+      "sha256": "6b75f929cbde6548ddb3cb2dcac9194a40eae3a8707d7c68bb361df258b1974e"
+    },
+    {
+      "path": "baselines8_v4/flow_score_cfg18/planner.py",
+      "source_name": "baselines8_flowcfg18_seed20260922_1028_v4.tar.gz",
+      "source_id": "S07",
+      "size_bytes": 16054,
+      "sha256": "9e874d599652aead06e90b3ccc797ae2fb45c7d93d43d1a987fe32cfb65e59e8"
+    },
+    {
+      "path": "baselines8_v4/scripts/baseline_extension_config_1028.py",
+      "source_name": "baselines8_flowcfg18_seed20260922_1028_v4.tar.gz",
+      "source_id": "S07",
+      "size_bytes": 7304,
+      "sha256": "cccc1066642cbdd5b2e66dafafc9866e85e5ca5d0bbcbed2519ca3acce9c28eb"
+    },
+    {
+      "path": "baselines8_v4/scripts/baseline_extra_planners_1028.py",
+      "source_name": "baselines8_flowcfg18_seed20260922_1028_v4.tar.gz",
+      "source_id": "S07",
+      "size_bytes": 9280,
+      "sha256": "307e9c4393198dbdd216a7fb063faf1aea20841cd8c2d173f534d296708ca552"
+    },
+    {
+      "path": "baselines8_v4/scripts/baseline_job_cleanup_1028.py",
+      "source_name": "baselines8_flowcfg18_seed20260922_1028_v4.tar.gz",
+      "source_id": "S07",
+      "size_bytes": 3372,
+      "sha256": "6998a80e8db929d83c1867fa502d3705300b3d589c0f3cdfc4983beb3f6744d6"
+    },
+    {
+      "path": "baselines8_v4/scripts/evaluate_baselines_val_reactive_1028.py",
+      "source_name": "baselines8_flowcfg18_seed20260922_1028_v4.tar.gz",
+      "source_id": "S07",
+      "size_bytes": 25937,
+      "sha256": "edfef7352c5f3c164704a32cc15ef771f681affce3508a91d19b3137b9745b07"
+    },
+    {
+      "path": "baselines8_v4/scripts/stop_energy_evaluation_1028.py",
+      "source_name": "baselines8_flowcfg18_seed20260922_1028_v4.tar.gz",
+      "source_id": "S07",
+      "size_bytes": 6965,
+      "sha256": "6062be3e74fb85a18a3f2e28b6e77c4c29d97e11a0b482110a28e89e7ac33742"
+    },
+    {
+      "path": "2026-11-02/run_baselines_parallel_1102.py",
+      "source_name": "run_baselines_parallel_1102.py",
+      "source_id": "S08",
+      "size_bytes": 29565,
+      "sha256": "6667c61c10caf4c6d886727a9aba70dcf0981ff462f09070428042ebd3e9cd81"
+    },
+    {
+      "path": "2026-11-02/run_flow_reproduction_1102.py",
+      "source_name": "run_flow_reproduction_1102.py",
+      "source_id": "S09",
+      "size_bytes": 27115,
+      "sha256": "ec101df8e8a03fcd25f3ef9eb2756618eeaa1d02082bd8426c9489de8ef27759"
+    }
+  ]
+}

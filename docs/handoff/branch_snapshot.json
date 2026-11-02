@@ -1,0 +1,91 @@
+{
+  "checked_on": "2026-11-02",
+  "repository": "ecowyk/Score_Function",
+  "branches": [
+    {
+      "name": "codex/dit-score-branch",
+      "sha": "d480c9d3ea3ad0e4011a1785262b2998d258a1a0",
+      "protected": false
+    },
+    {
+      "name": "codex/flow-cfg18-repro-1028",
+      "sha": "73f47018a7fca2b265b4b74f5a722d989b42cd97",
+      "protected": false
+    },
+    {
+      "name": "codex/flow-score-k20-1028",
+      "sha": "a4b6fa31e0954c9eb93a286ab88090967245a354",
+      "protected": false
+    },
+    {
+      "name": "codex/g-local-k-1012",
+      "sha": "b3da79e927c633dbcea93b9a78a1c5bc6a6762a1",
+      "protected": false
+    },
+    {
+      "name": "codex/g-seed-k-1015",
+      "sha": "fffeb75636b3b92f4409cbedc2a475890df3182a",
+      "protected": false
+    },
+    {
+      "name": "codex/g-sigma-trials-1012",
+      "sha": "4685b485eb003c8e3db7e5c3ba2a7595b172bd11",
+      "protected": false
+    },
+    {
+      "name": "codex/mentor-score-handoff",
+      "sha": "d62cebaf40af164ee156f0eadcabadcf18f71767",
+      "protected": false
+    },
+    {
+      "name": "codex/pdm-gcpgp-score-k20-1021",
+      "sha": "561ff56edf614933efa290cb5ee1cbd6fb6ce328",
+      "protected": false
+    },
+    {
+      "name": "codex/pluto-score-k20-1025",
+      "sha": "f8a159a1babda502e12e34b162d904cdf7f1063f",
+      "protected": false
+    },
+    {
+      "name": "codex/random-baselines-energy-1025",
+      "sha": "7f3df70601c8a6b1f4c352b50a70e70687fde8dd",
+      "protected": false
+    },
+    {
+      "name": "codex/score-context-gif-1014",
+      "sha": "ef29f0c8457b0f81cf1e284be0c073b12d4e6958",
+      "protected": false
+    },
+    {
+      "name": "codex/score-energy-parameterization",
+      "sha": "3e6ea79f00ac0c2d7cd2a0d6750e3b0a7143fadf",
+      "protected": false
+    },
+    {
+      "name": "codex/static-score-context-1012",
+      "sha": "8aacef24435e368a9c41266ce067f841ba531abe",
+      "protected": false
+    },
+    {
+      "name": "codex/test14hard-full-k-suite",
+      "sha": "011f70c570ad8213333d957ed380c93102765f1d",
+      "protected": false
+    },
+    {
+      "name": "codex/training-progress",
+      "sha": "9cbb670bf7a6f51e0a9affd668f605b54c26c138",
+      "protected": false
+    },
+    {
+      "name": "codex/urbandriver-score-k20-1017",
+      "sha": "83f39cdb27b4abc5ce95ff449a46759474bd09dc",
+      "protected": false
+    },
+    {
+      "name": "main",
+      "sha": "65524db113a4684e8dc376c841be4c8640156a0a",
+      "protected": false
+    }
+  ]
+}
