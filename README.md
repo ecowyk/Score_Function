@@ -1,5 +1,9 @@
 # Score Function
 
+## 科研项目与多 agent 交接
+
+新参与科研的 agent 请先阅读 **[项目交接入口（2026-11-02）](docs/handoff/START_HERE.md)**。其中包含研究定位、当前方法、已报告实验、运行进度快照、分支映射和协作约定。根目录 [AGENTS.md](AGENTS.md) 给出接手规则；实时服务器状态仍以运行日志和回执为准。
+
 独立的条件 Score 模块，用于细化规划模型输出的 ego 未来轨迹。业务接入从 [接入指南](docs/integration.md) 和 [最小示例](examples/business_integration.py) 开始。
 
 ```text
@@ -64,3 +68,4 @@ python -m unittest discover -s tests -v
 ```
 
 核心单元测试是接口保障，应当保留；依赖官方源码、真实数据的检查会在缺失条件时明确跳过。历史实验验证记录见 [docs/validation.md](docs/validation.md)。
+
