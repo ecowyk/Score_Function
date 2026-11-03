@@ -30,7 +30,8 @@ def validate_epoch(models, dataset, cfg, device, *, description="Validation"):
             batch = device_batch(cpu_batch, device)
             for repeat in range(cfg["validation_repeats"]):
                 noise = sample_noise(
-                    (80, 4), batch["tokens"], cfg["validation_seed"], f"clean_validation_{repeat}"
+                    batch["target"].shape[1:], batch["tokens"], cfg["validation_seed"],
+                    f"clean_validation_{repeat}",
                 ).to(device)
                 noisy = batch["target"] + cfg["sigma"] * noise
                 for index, model in enumerate(models.values()):

@@ -2,6 +2,8 @@
 
 独立的条件 Score 模块，用于细化规划模型输出的 ego 未来轨迹。业务接入从 [接入指南](docs/integration.md) 和 [最小示例](examples/business_integration.py) 开始。
 
+**NAVSIM v1 / DiffusionDrive** 已有独立实现。请从 [单场景核对、缓存、训练与配对评测](docs/navsim_diffusiondrive.md) 开始。以下 DP 命令用于原有 nuPlan 实验。
+
 ```text
 业务规划模型 → ego 候选轨迹 → 归一化 → Score 迭代 → 反归一化 → 业务轨迹输出
                                         ↑

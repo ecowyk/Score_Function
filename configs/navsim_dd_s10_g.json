@@ -1,0 +1,32 @@
+{
+  "model": {
+    "architecture": "temporal_score_function",
+    "parameterization": "score",
+    "future_len": 8,
+    "input_dim": 4,
+    "context_dim": 256,
+    "hidden_dim": 192,
+    "num_heads": 6,
+    "dropout": 0.1,
+    "pre_dilations": [1, 2],
+    "post_dilations": [2, 4],
+    "temporal_attention": true,
+    "neighbor_future": false
+  },
+  "sigma": 0.1,
+  "gamma": 0.1,
+  "epochs": 100,
+  "microbatch_size": 64,
+  "num_workers": 2,
+  "learning_rate": 0.0005,
+  "warmup_learning_rate": 0.00005,
+  "warmup_epochs": 5,
+  "lr_schedule": "constant_after_warmup",
+  "weight_decay": 0.01,
+  "gradient_clip": 5.0,
+  "ema_decay": 0.999,
+  "ema_warmup": false,
+  "seed": 20260922,
+  "validation_seed": 20260922,
+  "validation_repeats": 4
+}
