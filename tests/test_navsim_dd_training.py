@@ -6,6 +6,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.multiprocessing.spawn import ProcessRaisedException
 
 from score_function.navsim_dd import train as trainer
 from score_function.navsim_dd.cache import CONDITIONER_KEYS, _publish_cache
@@ -24,6 +27,19 @@ def _tiny_cache(directory, identity):
         for split, count in (("train", 4), ("val", 3))
     ]
     _publish_cache(directory, {**identity, "data_root": "fixture"}, chunks)
+
+def _train_rank(rank, folder):
+    root = Path(folder)
+    torch.set_num_threads(1)
+    dist.init_process_group("gloo", init_method=(root / "gloo").resolve().as_uri(),
+                            rank=rank, world_size=2)
+    try:
+        cfg = read_json(trainer.DEFAULT_CONFIG)
+        cfg["model"].update(hidden_dim=12, num_heads=3)
+        cfg.update(microbatch_size=2, num_workers=0, validation_repeats=1, epochs=1)
+        trainer.train(root / "cache", root / "run", cfg, torch.device("cpu"))
+    finally:
+        dist.destroy_process_group()
 
 
 class NavsimTrainingTests(unittest.TestCase):
@@ -63,3 +79,20 @@ class NavsimTrainingTests(unittest.TestCase):
             _tiny_cache(other_cache, {**identity, "checkpoint_sha256": "other weights"})
             with self.assertRaisesRegex(RuntimeError, "Resume rejected"):
                 trainer.train(other_cache, resumed, cfg, device, resume=True)
+
+    @unittest.skipUnless(dist.is_available() and dist.is_gloo_available(), "requires Gloo")
+    def test_two_rank_training_publishes_one_complete_epoch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _tiny_cache(root / "cache", {key: key + "-fixture" for key in CONDITIONER_KEYS})
+            try:
+                mp.spawn(_train_rank, args=(tmp,), nprocs=2, join=True)
+            except ProcessRaisedException as exc:
+                if "gloo/transport" in str(exc) and "Operation not permitted" in str(exc):
+                    self.skipTest("Local execution environment forbids Gloo sockets")
+                raise
+            last = load_tensor(root / "run" / "last.pt")
+            self.assertEqual(len(last["rng_by_rank"]), 2)
+            self.assertEqual(last["step"], 1)
+            self.assertEqual(read_json(root / "run" / "run.json")["global_batch"], 4)
+            self.assertEqual(load_tensor(root / "run" / "final_ema.pt")["epoch"], 1)
