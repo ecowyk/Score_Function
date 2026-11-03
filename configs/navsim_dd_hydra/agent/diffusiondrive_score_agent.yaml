@@ -1,0 +1,8 @@
+_target_: score_function.navsim_dd.agent.DiffusionDriveScoreAgent
+checkpoint: ${oc.env:DD_CKPT}
+anchor: ${oc.env:DD_ANCHOR}
+backbone: ${oc.env:DD_BACKBONE}
+score_checkpoint: null
+steps: 20
+gamma: null
+device: cpu
