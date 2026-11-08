@@ -47,3 +47,21 @@ nohup bash scripts/train_navsim_dd_aligned.sh --resume \
 恢复时必须匹配本次配置、缓存与八卡协议。旧 200 epoch 实验的 checkpoint 和输出目录不能用于这个入口。若本机同用户还运行着输出到 `dd_score_s10g_v1_e200` 的确切训练进程，脚本会显示相关 PID 并退出，需要先处理该运行。脚本使用调用终端当前的 `CUDA_VISIBLE_DEVICES`，如需指定物理卡，在启动前自行设置。
 
 主结果取 `final_raw.pt`，`best_raw.pt` 按验证 DSM 选择，`last.pt` 仅供恢复。兼容接口保留的 `final_ema.pt`、`best_ema.pt` 在这组 EMA decay 为 0 的配置下同样存放 raw weights，导出字段 `weight_kind=raw`。评测时优先使用显式的 `final_raw.pt`。每个 epoch 的学习率、训练/验证 DSM 和 AMP 跳过更新数记录在 `history.json`。
+
+若共享 NFS 的缓存读取有延迟，可以将已验收的完整缓存复制到本节点的 SSD 或 `/dev/shm`，再通过绝对路径 `SCORE_CACHE_DIR` 指定副本。原有 manifest、分片和验收记录必须原样保留，复制不会重新提取特征。训练器的恢复签名校验缓存内容身份，不绑定缓存所在路径。
+
+```bash
+mkdir -p /dev/shm/wyk_dd_score_cache_v1
+rsync -a --checksum --info=progress2 \
+  /home/data/wyk/dataset/navsim/exp/dd_score_cache_v1/ \
+  /dev/shm/wyk_dd_score_cache_v1/
+
+cd /home/data/wyk/Score_Function_NAVSIM_DDAligned
+nohup env SCORE_CACHE_DIR=/dev/shm/wyk_dd_score_cache_v1 \
+  bash scripts/train_navsim_dd_aligned.sh \
+  >> /home/data/wyk/dataset/navsim/exp/dd_score_ddaligned_v1.log 2>&1 < /dev/null &
+```
+
+只复制 Score 条件缓存，主要张量约 3.2 GiB；无需复制完整 NAVSIM 传感器数据。`/dev/shm` 属于本节点/容器的临时内存存储，重启后若副本丢失，可重新复制后以 `--resume` 继续。checkpoint 和日志仍写入 `/home/data/wyk/dataset/navsim/exp`。
+
+每轮日志额外报告 rank 0 的 `elapsed`、`train`、`validation` 秒数；总耗时包含保存 checkpoint 与同步，训练阶段包含加载与通信。用多轮耗时比较 NFS 与本地缓存效果，不能仅凭 GPU 活跃率或一次验证变慢认定瓶颈。

@@ -13,12 +13,12 @@ done
 
 w=${WYK_ROOT:-/home/data/wyk}
 sf=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
-cache="$w/dataset/navsim/exp/dd_score_cache_v1"
+cache=${SCORE_CACHE_DIR:-"$w/dataset/navsim/exp/dd_score_cache_v1"}
 output="$w/dataset/navsim/exp/dd_score_ddaligned_v1"
 python="$w/envs/diffusion_drive/bin/python"
 config="$sf/configs/navsim_dd_s10_g_ddaligned.json"
-[[ "$w" = /* && -x "$python" && -f "$config" && -f "$cache/TRAINING_READY.json" ]] || {
-    echo "Missing aligned config, prepared cache, or Python environment under $w" >&2
+[[ "$w" = /* && "$cache" = /* && -x "$python" && -f "$config" && -f "$cache/TRAINING_READY.json" ]] || {
+    echo "Require absolute WYK_ROOT/SCORE_CACHE_DIR, aligned config, prepared cache, and Python environment." >&2
     exit 1
 }
 export PATH="$(dirname "$python"):$PATH" PYTHONPATH="$sf:$w/DiffusionDrive:$w/nuplan-devkit"
@@ -28,6 +28,7 @@ cd "$sf"
 # The launcher's lock is adjacent to output, preserving the trainer's empty-directory check.
 exec 9>"$output.launcher.lock"
 flock -n 9 || { echo "Another aligned launcher owns $output" >&2; exit 1; }
+printf 'Training cache: %s\nTraining output: %s\n' "$cache" "$output"
 
 "$python" - "$config" "$cache" "$output" "$resume" "$w" <<'PY'
 import os

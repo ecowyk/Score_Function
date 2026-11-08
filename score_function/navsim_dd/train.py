@@ -8,6 +8,7 @@ import fcntl
 import math
 import os
 import random
+import time
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
@@ -253,6 +254,7 @@ def train(cache_dir, output, cfg, device, *, resume=False):
                f"world={world}, global_batch={batch_size}, updates/epoch={updates}, "
                f"precision={precision}, validation_weights={weight_kind}")
         for epoch in range(len(history), cfg["epochs"]):
+            epoch_started = time.perf_counter()
             if drop_last:
                 sampler = EpochBatchSampler(
                     len(training), batch_size, cfg["microbatch_size"], rank, world,
@@ -297,7 +299,9 @@ def train(cache_dir, output, cfg, device, *, resume=False):
                 if skipped_updates == world * updates:
                     raise FloatingPointError("Every optimizer update was skipped by AMP in this epoch")
             # Keep validation in FP32 for comparable DSM across training precision.
+            validation_started = time.perf_counter()
             val = validate_epoch({weight_kind: validation_model}, validation, cfg, device)[weight_kind]
+            validation_seconds = time.perf_counter() - validation_started
             row = {
                 "epoch": epoch + 1, "step": step,
                 "train_dsm": loss_sum / denominator, "val_dsm": val, "lr": result["lr"],
@@ -324,7 +328,10 @@ def train(cache_dir, output, cfg, device, *, resume=False):
                 f"  AMP skipped rank-updates {skipped_updates}/{world * updates}, "
                 f"scale {row['amp_scale']:g}" if scaler is not None else ""
             )
-            report(f"epoch {row['epoch']}  train DSM {row['train_dsm']:.6f}  val DSM {val:.6f}{amp_status}")
+            report(f"epoch {row['epoch']}  train DSM {row['train_dsm']:.6f}  val DSM {val:.6f}{amp_status}"
+                   f"  elapsed {time.perf_counter() - epoch_started:.1f}s"
+                   f"  train {validation_started - epoch_started:.1f}s"
+                   f"  validation {validation_seconds:.1f}s")
 
 
 def main():
