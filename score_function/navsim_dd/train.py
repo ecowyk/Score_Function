@@ -14,6 +14,8 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data import BatchSampler
+from torch.utils.data.distributed import DistributedSampler
 
 from score_function.model.score_branch import build_model
 from score_function.navsim_dd.cache import NavsimScoreDataset, load_cache_metadata
@@ -53,14 +55,26 @@ def _check_config(cfg):
     for key in ("num_workers", "warmup_epochs"):
         if type(cfg[key]) is not int or cfg[key] < 0:
             raise ValueError(f"{key} must be a nonnegative integer")
-    for key in ("sigma", "learning_rate", "warmup_learning_rate", "gradient_clip"):
+    for key in ("sigma", "learning_rate", "warmup_learning_rate"):
         if not math.isfinite(cfg[key]) or cfg[key] <= 0:
             raise ValueError(f"{key} must be finite and positive")
-    for key in ("gamma", "weight_decay"):
+    for key in ("gamma", "weight_decay", "gradient_clip"):
         if not math.isfinite(cfg[key]) or cfg[key] < 0:
             raise ValueError(f"{key} must be finite and nonnegative")
-    if not 0 <= cfg["ema_decay"] < 1 or cfg["lr_schedule"] != "constant_after_warmup":
+    if not 0 <= cfg["ema_decay"] < 1 or cfg["lr_schedule"] not in (
+        "constant_after_warmup", "dd_warmup_cosine",
+    ):
         raise ValueError("Invalid EMA decay or learning-rate schedule")
+    if cfg.get("precision", "32-true") not in ("32-true", "16-mixed"):
+        raise ValueError("precision must be '32-true' or '16-mixed'")
+    if type(cfg.get("drop_last", True)) is not bool:
+        raise ValueError("drop_last must be a boolean")
+    if cfg["lr_schedule"] == "dd_warmup_cosine":
+        minimum = cfg.get("min_learning_rate")
+        if minimum is None or not math.isfinite(minimum) or not 0 <= minimum <= cfg["learning_rate"]:
+            raise ValueError("min_learning_rate must be finite and between zero and learning_rate")
+        if not 0 < cfg["warmup_epochs"] < cfg["epochs"]:
+            raise ValueError("DD cosine requires 0 < warmup_epochs < epochs")
 
 
 @contextmanager
@@ -97,19 +111,30 @@ def _seed(seed):
 def train(cache_dir, output, cfg, device, *, resume=False):
     """Call after initializing torchrun. Recovery starts at the latest durable epoch."""
     _check_config(cfg)
+    precision = cfg.get("precision", "32-true")
+    if precision == "16-mixed" and device.type != "cuda":
+        raise ValueError("16-mixed training requires CUDA; use 32-true for CPU runs")
     output = Path(output)
     rank, world = ddp.rank(), ddp.world_size()
     metadata = load_cache_metadata(cache_dir)
     training = NavsimScoreDataset(cache_dir, "train")
     validation = NavsimScoreDataset(cache_dir, "val")
     batch_size = cfg["microbatch_size"] * world
-    updates = len(training) // batch_size
+    drop_last = cfg.get("drop_last", True)
+    updates = (
+        len(training) // batch_size if drop_last
+        else math.ceil(math.ceil(len(training) / world) / cfg["microbatch_size"])
+    )
     if updates < 1 or not len(validation):
-        raise ValueError("Need a nonempty validation split and a complete global training batch. "
-                         "Use a smaller --batch-size for a small cache.")
-    # Each full globally shuffled batch is partitioned evenly among workers.
+        raise ValueError("Need nonempty train/validation splits and at least one training batch. "
+                         "With drop_last=True, reduce --batch-size for a small cache.")
+    # Cosine depends on the complete training horizon. Legacy constant-LR runs
+    # may extend epochs, and absent precision stays absent in their signature.
+    excluded = {"num_workers"}
+    if cfg["lr_schedule"] == "constant_after_warmup":
+        excluded.add("epochs")
     protocol = {
-        "config": {k: v for k, v in cfg.items() if k not in ("epochs", "num_workers")},
+        "config": {k: v for k, v in cfg.items() if k not in excluded},
         "world_size": world,
         "device_type": device.type,
         "cache_fingerprint": fingerprint(metadata),
@@ -132,6 +157,10 @@ def train(cache_dir, output, cfg, device, *, resume=False):
                 "signature": signature, "config": cfg, "protocol": protocol,
                 "updates_per_epoch": updates, "global_batch": batch_size,
                 "train_samples": len(training), "val_samples": len(validation),
+                "drop_last": drop_last,
+                "train_presentations_per_epoch": (
+                    updates * batch_size if drop_last else math.ceil(len(training) / world) * world
+                ),
                 "sigma_in_physical_channels": [cfg["sigma"] * s for s in metadata["normalizer"]["std"]],
             })
 
@@ -144,10 +173,15 @@ def train(cache_dir, output, cfg, device, *, resume=False):
             model, device_ids=[device.index] if device.type == "cuda" else None,
             broadcast_buffers=False,
         ) if world > 1 else None
-        ema = copy.deepcopy(model).eval().requires_grad_(False)
+        # With decay zero the validated/exported model is the raw model. No
+        # separate averaged network is needed for the DD-aligned experiment.
+        ema = copy.deepcopy(model).eval().requires_grad_(False) if cfg["ema_decay"] else None
+        validation_model = model if ema is None else ema
+        weight_kind = "raw" if ema is None else "ema"
         optimizer = torch.optim.AdamW(
             model.parameters(), lr=cfg["learning_rate"], weight_decay=cfg["weight_decay"]
         )
+        scaler = torch.cuda.amp.GradScaler() if precision == "16-mixed" else None
         history, step, best_weights = [], 0, None
         _seed(cfg["seed"] + rank + 1)
         if resume and last_path.exists():
@@ -156,12 +190,27 @@ def train(cache_dir, output, cfg, device, *, resume=False):
                 raise ValueError("Resume checkpoint does not match this NAVSIM experiment")
             history, step, best_weights = last["history"], last["step"], last["best_weights"]
             model.load_state_dict(last["raw"])
-            ema.load_state_dict(last["ema"])
+            if ema is not None:
+                ema.load_state_dict(last["ema"])
             optimizer.load_state_dict(last["optimizer"])
+            if scaler is not None:
+                if last.get("scaler") is None:
+                    raise ValueError("Mixed-precision resume checkpoint is missing GradScaler state")
+                scaler.load_state_dict(last["scaler"])
             restore_rank_rng(last["rng_by_rank"][rank], device)
             del last
         if len(history) > cfg["epochs"]:
             raise ValueError("--epochs is smaller than the number of completed epochs")
+
+        def refresh_run_metadata():
+            # Record an extended constant-LR target only after checkpoint
+            # validation succeeds. The compatible protocol/signature is stable.
+            record = read_json(output / "run.json")
+            record.update(config=cfg, protocol=protocol, signature=signature)
+            atomic_write(output / "run.json", record)
+
+        if resume:
+            _rank_zero(refresh_run_metadata)
 
         def publish_exports(final=False, repair_best=False):
             """Derive deployment files from the committed epoch, also after a failed write."""
@@ -173,62 +222,109 @@ def train(cache_dir, output, cfg, device, *, resume=False):
                 "format": CHECKPOINT_FORMAT, "model": cfg["model"],
                 "sigma": cfg["sigma"], "gamma": cfg["gamma"],
                 "normalizer": metadata["normalizer"], "conditioner_identity": metadata["conditioner_identity"],
+                "weight_kind": weight_kind, "training_precision": precision,
             }
             atomic_write(output / "history.json", history)
             if repair_best or best_row["epoch"] == epoch:
-                atomic_write(output / "best_ema.pt", {
+                best_export = {
                     **common, "state_dict": best_weights, "epoch": best_row["epoch"],
                     "val_dsm": best_row["val_dsm"],
-                }, tensor=True)
+                }
+                atomic_write(output / "best_ema.pt", best_export, tensor=True)
+                if ema is None:
+                    atomic_write(output / "best_raw.pt", best_export, tensor=True)
             if final:
-                atomic_write(output / "final_ema.pt", {
-                    **common, "state_dict": ema.state_dict(), "epoch": epoch,
+                final_export = {
+                    **common, "state_dict": validation_model.state_dict(), "epoch": epoch,
                     "val_dsm": history[-1]["val_dsm"],
-                }, tensor=True)
+                }
+                atomic_write(output / "final_ema.pt", final_export, tensor=True)
+                if ema is None:
+                    atomic_write(output / "final_raw.pt", final_export, tensor=True)
 
         if resume and history:
             # Republish even when last.pt was committed just before the job stopped.
             _rank_zero(lambda: publish_exports(final=len(history) == cfg["epochs"], repair_best=True))
         if len(history) < cfg["epochs"]:
             _rank_zero(lambda: (output / "final_ema.pt").unlink(missing_ok=True))
+            if ema is None:
+                _rank_zero(lambda: (output / "final_raw.pt").unlink(missing_ok=True))
         report(f"NAVSIM score train: {len(training)} train, {len(validation)} val, "
-               f"world={world}, global_batch={batch_size}, updates/epoch={updates}")
+               f"world={world}, global_batch={batch_size}, updates/epoch={updates}, "
+               f"precision={precision}, validation_weights={weight_kind}")
         for epoch in range(len(history), cfg["epochs"]):
-            sampler = EpochBatchSampler(
-                len(training), batch_size, cfg["microbatch_size"], rank, world,
-                cfg["seed"], epoch,
-            )
+            if drop_last:
+                sampler = EpochBatchSampler(
+                    len(training), batch_size, cfg["microbatch_size"], rank, world,
+                    cfg["seed"], epoch,
+                )
+            else:
+                # Match Lightning's DDP sampler padding and keep the final
+                # partial per-rank batch, as in native DiffusionDrive training.
+                distributed_sampler = DistributedSampler(
+                    training, num_replicas=world, rank=rank, shuffle=True,
+                    seed=cfg["seed"], drop_last=False,
+                )
+                distributed_sampler.set_epoch(epoch)
+                sampler = BatchSampler(distributed_sampler, cfg["microbatch_size"], drop_last=False)
             loader = build_data_loader(training, cfg, batch_sampler=sampler)
             loss_sum = 0.
+            sample_count = 0
+            skipped_updates = 0
             for result in train_epoch(
                 loader, model, optimizer, cfg, ema, device, start_step=step, start_update=0,
                 updates_per_epoch=updates, accumulation=1, next_lr=cfg["learning_rate"],
-                distributed_model=wrapped,
+                distributed_model=wrapped, scaler=scaler,
             ):
                 step = result["step"]
-                loss_sum += result["train_dsm"]
+                if drop_last:
+                    loss_sum += result["train_dsm"]
+                else:
+                    local_samples = result["sample_presentations"] // world
+                    loss_sum += result["train_dsm"] * local_samples
+                    sample_count += local_samples
+                skipped_updates += int(result.get("optimizer_step_skipped", False))
             loss_sum = ddp.sum_tensor(torch.tensor(loss_sum, dtype=torch.float64, device=device)).item()
-            val = validate_epoch({"ema": ema}, validation, cfg, device)["ema"]
+            denominator = world * updates
+            if not drop_last:
+                denominator = int(ddp.sum_tensor(
+                    torch.tensor(sample_count, dtype=torch.int64, device=device)
+                ).item())
+            if scaler is not None:
+                skipped_updates = int(ddp.sum_tensor(
+                    torch.tensor(skipped_updates, dtype=torch.int64, device=device)
+                ).item())
+                if skipped_updates == world * updates:
+                    raise FloatingPointError("Every optimizer update was skipped by AMP in this epoch")
+            # Keep validation in FP32 for comparable DSM across training precision.
+            val = validate_epoch({weight_kind: validation_model}, validation, cfg, device)[weight_kind]
             row = {
                 "epoch": epoch + 1, "step": step,
-                "train_dsm": loss_sum / (world * updates), "val_dsm": val, "lr": result["lr"],
+                "train_dsm": loss_sum / denominator, "val_dsm": val, "lr": result["lr"],
             }
+            if scaler is not None:
+                row.update(amp_skipped_rank_updates=skipped_updates, amp_scale=scaler.get_scale())
             if not history or val < min(item["val_dsm"] for item in history):
-                best_weights = {k: v.detach().cpu().clone() for k, v in ema.state_dict().items()}
+                best_weights = {k: v.detach().cpu().clone() for k, v in validation_model.state_dict().items()}
             history.append(row)
             rank_rng = ddp.gather_objects(capture_rank_rng(device))
 
             def save():
                 atomic_write(last_path, {
                     "format": "navsim-dd-train-v1", "signature": signature, "step": step,
-                    "raw": model.state_dict(), "ema": ema.state_dict(),
+                    "raw": model.state_dict(), "ema": validation_model.state_dict(),
                     "optimizer": optimizer.state_dict(), "rng_by_rank": rank_rng,
                     "best_weights": best_weights, "history": history,
+                    "scaler": scaler.state_dict() if scaler is not None else None,
                 }, tensor=True)
                 publish_exports(final=len(history) == cfg["epochs"])
 
             _rank_zero(save)
-            report(f"epoch {row['epoch']}  train DSM {row['train_dsm']:.6f}  val DSM {val:.6f}")
+            amp_status = (
+                f"  AMP skipped rank-updates {skipped_updates}/{world * updates}, "
+                f"scale {row['amp_scale']:g}" if scaler is not None else ""
+            )
+            report(f"epoch {row['epoch']}  train DSM {row['train_dsm']:.6f}  val DSM {val:.6f}{amp_status}")
 
 
 def main():

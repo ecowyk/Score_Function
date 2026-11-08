@@ -39,13 +39,31 @@ def early_stop_allowed(cfg, epoch, step):
 
 
 def learning_rate_at_step(cfg, step, updates_per_epoch, next_lr):
-    """Official epoch-wise linear warmup, or the unchanged legacy update warmup.
+    """Epoch-wise DD cosine/DP constant schedules, or legacy update warmup.
 
     DP's LinearLR starts at 0.1 * base LR and reaches base LR at the beginning
     of warmup epoch 5 (zero-based epoch 4), then stays constant. We calculate
-    directly from the completed update count so mid-epoch resume is exact.
+    directly from the update position so resume preserves the schedule. DD's
+    cosine schedule uses its configured total epoch horizon.
     """
-    if cfg.get("lr_schedule", "validation_plateau") == "constant_after_warmup":
+    schedule = cfg.get("lr_schedule", "validation_plateau")
+    if schedule == "dd_warmup_cosine":
+        # Match DiffusionDrive's WarmupCosLR at the start of each epoch.
+        # Epoch indices 0, 1, 2 use 1/3, 2/3, 1 times the peak LR; index 3
+        # also starts at the peak. The scheduler reaches min_lr after epoch 100,
+        # not during the last training epoch (index 99).
+        if updates_per_epoch < 1 or step < 0:
+            raise ValueError("Require positive updates_per_epoch and nonnegative step")
+        epoch = min(step // updates_per_epoch, cfg["epochs"])
+        warmup = cfg["warmup_epochs"]
+        if not 0 < warmup < cfg["epochs"]:
+            raise ValueError("DD cosine requires 0 < warmup_epochs < epochs")
+        peak, minimum = cfg["learning_rate"], cfg["min_learning_rate"]
+        if epoch < warmup:
+            return peak * (epoch + 1) / warmup
+        phase = (epoch - warmup) / (cfg["epochs"] - warmup)
+        return minimum + 0.5 * (peak - minimum) * (1 + math.cos(math.pi * phase))
+    if schedule == "constant_after_warmup":
         epoch = step // updates_per_epoch
         warmup = cfg["warmup_epochs"]
         if warmup == 0 or epoch >= warmup:

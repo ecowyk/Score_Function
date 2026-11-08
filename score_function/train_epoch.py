@@ -62,6 +62,7 @@ def train_epoch(
     next_lr,
     distributed_model=None,
     batch_transform=None,
+    scaler=None,
 ):
     """Yield each completed optimizer update so the driver can save exact progress.
 
@@ -90,32 +91,59 @@ def train_epoch(
             noise = torch.randn_like(batch["target"])
             sync = wrapped.no_sync() if world > 1 and micro < accumulation - 1 else nullcontext()
             with sync:
-                score = wrapped(
-                    batch["target"] + cfg["sigma"] * noise,
-                    batch["context"],
-                    batch["route"],
-                    **neighbor_kwargs(batch),
+                precision = (
+                    torch.autocast(device_type="cuda", dtype=torch.float16)
+                    if scaler is not None else nullcontext()
                 )
-                loss = fixed_sigma_dsm_loss(score, noise, cfg["sigma"])
+                with precision:
+                    score = wrapped(
+                        batch["target"] + cfg["sigma"] * noise,
+                        batch["context"],
+                        batch["route"],
+                        **neighbor_kwargs(batch),
+                    )
+                # Keep squared DSM errors in FP32 even when the forward uses FP16.
+                loss = fixed_sigma_dsm_loss(
+                    score.float() if scaler is not None else score,
+                    noise.float() if scaler is not None else noise,
+                    cfg["sigma"],
+                )
                 if not torch.isfinite(loss):
                     raise FloatingPointError("Nonfinite training DSM")
-                (loss / accumulation).backward()
+                scaled_loss = loss / accumulation
+                if scaler is not None:
+                    scaled_loss = scaler.scale(scaled_loss)
+                scaled_loss.backward()
             update_loss += loss.item() / accumulation
-        torch.nn.utils.clip_grad_norm_(
-            model.parameters(), cfg["gradient_clip"], error_if_nonfinite=True
-        )
-        optimizer.step()
+        if cfg["gradient_clip"] > 0:
+            if scaler is not None:
+                scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), cfg["gradient_clip"], error_if_nonfinite=scaler is None
+            )
+        optimizer_step_skipped = False
+        if scaler is None:
+            optimizer.step()
+        else:
+            previous_scale = scaler.get_scale()
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer_step_skipped = scaler.get_scale() < previous_scale
         step += 1
-        decay = (
-            min(cfg["ema_decay"], (1 + step) / (10 + step))
-            if cfg["ema_warmup"]
-            else cfg["ema_decay"]
-        )
-        update_ema(averaged, model, decay)
-        yield {
+        if averaged is not None and not optimizer_step_skipped:
+            decay = (
+                min(cfg["ema_decay"], (1 + step) / (10 + step))
+                if cfg["ema_warmup"]
+                else cfg["ema_decay"]
+            )
+            update_ema(averaged, model, decay)
+        result = {
             "step": step,
             "cursor": update + 1,
             "train_dsm": update_loss,
             "lr": lr,
             "sample_presentations": sample_presentations,
         }
+        if scaler is not None:
+            result.update(optimizer_step_skipped=optimizer_step_skipped, amp_scale=scaler.get_scale())
+        yield result
