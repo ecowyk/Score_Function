@@ -1,7 +1,7 @@
 """Explicit full-state continuation of a completed raw-weight cosine run."""
 
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import copy
 import fcntl
 import math
@@ -20,11 +20,18 @@ from score_function.utils.training_budget import learning_rate_at_step
 
 
 @contextmanager
-def _locked_source(source):
+def _locked_source(source, required=True):
     source = Path(source).resolve(strict=True)
     # Every trainer creates this lock. Open the existing file read/write without
     # truncating or writing: NFS exclusive flock requires a writable descriptor.
-    with (source / ".train.lock").open("r+b") as lock:
+    try:
+        lock = (source / ".train.lock").open("r+b")
+    except FileNotFoundError:
+        if required:
+            raise
+        yield source
+        return
+    with lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
@@ -66,6 +73,46 @@ def _validate_rng(states, world, device_type):
             raise ValueError("CPU source unexpectedly contains CUDA RNG state")
 
 
+def _validate_resume_state(last, run, minimum_epochs, maximum_epochs):
+    """Validate a durable epoch checkpoint without requiring its final export."""
+    cfg, updates = run["config"], run["updates_per_epoch"]
+    fields = {"raw", "ema", "optimizer", "rng_by_rank", "best_weights", "history", "scaler", "step"}
+    if (last.get("format") != "navsim-dd-train-v1" or not fields <= last.keys()
+            or last.get("signature") != run["signature"]):
+        raise ValueError("Source last.pt is incomplete or belongs to a different protocol")
+    history = last["history"]
+    if (not isinstance(history, list) or not minimum_epochs <= len(history) <= maximum_epochs
+            or last["step"] != len(history) * updates):
+        raise ValueError("Source checkpoint has an inconsistent history or optimizer step count")
+    for epoch, row in enumerate(history):
+        expected_lr = learning_rate_at_step(cfg, epoch * updates, updates, cfg["learning_rate"])
+        if (row.get("epoch") != epoch + 1 or row.get("step") != (epoch + 1) * updates
+                or not all(math.isfinite(row.get(key, float("nan"))) for key in ("train_dsm", "val_dsm", "lr"))
+                or not math.isclose(row["lr"], expected_lr, rel_tol=1e-12, abs_tol=0)):
+            raise ValueError("Source history is not contiguous or does not follow its recorded cosine schedule")
+    if not _same_weights(last["raw"], last["ema"]):
+        raise ValueError("Raw source checkpoint has inconsistent raw/EMA compatibility weights")
+    best = last["best_weights"]
+    if (not isinstance(best, Mapping) or best.keys() != last["raw"].keys()
+            or any(not isinstance(best[key], torch.Tensor) or best[key].shape != value.shape
+                   or best[key].dtype != value.dtype for key, value in last["raw"].items())):
+        raise ValueError("Source checkpoint is missing its best weights")
+    optimizer = last["optimizer"]
+    if not isinstance(optimizer, Mapping) or not optimizer.get("param_groups") or not optimizer.get("state"):
+        raise ValueError("Source checkpoint is missing AdamW optimizer state")
+    parameter_ids = [pid for group in optimizer["param_groups"] for pid in group.get("params", [])]
+    if (not parameter_ids or len(set(parameter_ids)) != len(parameter_ids)
+            or not set(optimizer["state"]) <= set(parameter_ids)
+            or any(not {"step", "exp_avg", "exp_avg_sq"} <= state.keys()
+                   for state in optimizer["state"].values())):
+        raise ValueError("Source AdamW optimizer state is incomplete")
+    _validate_rng(last["rng_by_rank"], run["protocol"]["world_size"], run["protocol"]["device_type"])
+    if last["scaler"] is not None and not isinstance(last["scaler"], Mapping):
+        raise ValueError("Invalid source GradScaler state")
+    if cfg.get("precision", "32-true") == "16-mixed" and not last["scaler"]:
+        raise ValueError("Mixed-precision source is missing its GradScaler state")
+
+
 def _plan_locked(source, cache_dir, additional_epochs):
     if type(additional_epochs) is not int or additional_epochs <= 0:
         raise ValueError("additional_epochs must be a positive integer")
@@ -98,40 +145,12 @@ def _plan_locked(source, cache_dir, additional_epochs):
     # last.pt is the trusted local training checkpoint, including Python/NumPy
     # RNG and AdamW state. The portable final_raw.pt alone cannot resume training.
     last = load_tensor(source / "last.pt")
-    fields = {"raw", "ema", "optimizer", "rng_by_rank", "best_weights", "history", "scaler", "step"}
-    if (last.get("format") != "navsim-dd-train-v1" or not fields <= last.keys()
-            or last.get("signature") != original["signature"]):
-        raise ValueError("Source last.pt is incomplete or belongs to a different protocol")
     history = read_json(source / "history.json")
     epochs = cfg["epochs"]
-    if (not isinstance(history, list) or len(history) != epochs or history != last["history"]
-            or last["step"] != epochs * updates):
+    _validate_resume_state(last, original, epochs, epochs)
+    if history != last["history"]:
         raise ValueError("Source must contain a completed, matching history and optimizer step count")
-    for epoch, row in enumerate(history):
-        expected_lr = learning_rate_at_step(cfg, epoch * updates, updates, cfg["learning_rate"])
-        if (row.get("epoch") != epoch + 1 or row.get("step") != (epoch + 1) * updates
-                or not all(math.isfinite(row.get(key, float("nan"))) for key in ("train_dsm", "val_dsm", "lr"))
-                or not math.isclose(row["lr"], expected_lr, rel_tol=1e-12, abs_tol=0)):
-            raise ValueError("Source history is not contiguous or does not follow its recorded cosine schedule")
-    if not _same_weights(last["raw"], last["ema"]):
-        raise ValueError("Raw source checkpoint has inconsistent raw/EMA compatibility weights")
-    if not isinstance(last["best_weights"], Mapping) or last["best_weights"].keys() != last["raw"].keys():
-        raise ValueError("Source checkpoint is missing its best weights")
-    optimizer = last["optimizer"]
-    if not isinstance(optimizer, Mapping) or not optimizer.get("param_groups") or not optimizer.get("state"):
-        raise ValueError("Source checkpoint is missing AdamW optimizer state")
-    parameter_ids = [pid for group in optimizer["param_groups"] for pid in group.get("params", [])]
-    if (not parameter_ids or len(set(parameter_ids)) != len(parameter_ids)
-            or not set(optimizer["state"]) <= set(parameter_ids)
-            or any(not {"step", "exp_avg", "exp_avg_sq"} <= state.keys()
-                   for state in optimizer["state"].values())):
-        raise ValueError("Source AdamW optimizer state is incomplete")
-    _validate_rng(last["rng_by_rank"], world, device_type)
     precision = cfg.get("precision", "32-true")
-    if last["scaler"] is not None and not isinstance(last["scaler"], Mapping):
-        raise ValueError("Invalid source GradScaler state")
-    if precision == "16-mixed" and not last["scaler"]:
-        raise ValueError("Mixed-precision source is missing its GradScaler state")
     final = torch.load(source / "final_raw.pt", map_location="cpu", weights_only=True)
     final_metadata = {
         "format": CHECKPOINT_FORMAT, "epoch": epochs, "weight_kind": "raw",
@@ -189,16 +208,133 @@ def prepare_continuation(source, output, cache_dir, additional_epochs=150):
         if output == source or source in output.parents:
             raise ValueError("Continuation output must be outside the source run")
         plan = _plan_locked(source, cache_dir, additional_epochs)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        with TemporaryDirectory(prefix=f".{output.name}.continuation-", dir=output.parent) as temporary:
-            stage = Path(temporary) / "run"
-            stage.mkdir()
-            atomic_write(stage / "config.json", plan["config"])
-            atomic_write(stage / "run.json", plan["run"])
-            atomic_write(stage / "history.json", plan["last"]["history"])
-            atomic_write(stage / "continuation.json", plan["provenance"])
-            atomic_write(stage / "last.pt", plan["last"], tensor=True)
-            if output.exists() or output.is_symlink():
-                raise FileExistsError(f"Continuation output already exists: {output}")
-            stage.rename(output)
+        _publish_plan(output, plan)
+        return plan
+
+
+def _publish_plan(output, plan):
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(prefix=f".{output.name}.continuation-", dir=output.parent) as temporary:
+        stage = Path(temporary) / "run"
+        stage.mkdir()
+        atomic_write(stage / "config.json", plan["config"])
+        atomic_write(stage / "run.json", plan["run"])
+        atomic_write(stage / "history.json", plan["last"]["history"])
+        atomic_write(stage / "continuation.json", plan["provenance"])
+        atomic_write(stage / "last.pt", plan["last"], tensor=True)
+        if output.exists() or output.is_symlink():
+            raise FileExistsError(f"Continuation output already exists: {output}")
+        stage.rename(output)
+
+
+def _same_state(left, right):
+    if isinstance(left, torch.Tensor):
+        return isinstance(right, torch.Tensor) and left.dtype == right.dtype and torch.equal(left, right)
+    if isinstance(left, np.ndarray):
+        return isinstance(right, np.ndarray) and left.dtype == right.dtype and np.array_equal(left, right)
+    if isinstance(left, Mapping):
+        return isinstance(right, Mapping) and left.keys() == right.keys() and all(
+            _same_state(value, right[key]) for key, value in left.items())
+    if isinstance(left, (list, tuple)):
+        return type(left) is type(right) and len(left) == len(right) and all(
+            _same_state(a, b) for a, b in zip(left, right))
+    return left == right
+
+
+def _reconfigure_plan(plan, cfg, provenance, last):
+    protocol = {**plan["run"]["protocol"], "config": {k: v for k, v in cfg.items() if k != "num_workers"}}
+    signature = fingerprint(protocol)
+    return {"config": cfg, "provenance": provenance,
+            "run": {**plan["run"], "config": cfg, "protocol": protocol,
+                    "signature": signature, "continuation": provenance},
+            "last": {**last, "signature": signature, "continuation": provenance}}
+
+
+def _plan_retarget_locked(original, previous, cache_dir, target_epochs, every, start):
+    source_epochs = read_json(original / "run.json")["config"]["epochs"]
+    if type(target_epochs) is not int or target_epochs <= source_epochs:
+        raise ValueError("target_epochs must exceed the completed original budget")
+    if (type(every) is not int or every <= 0 or type(start) is not int
+            or not source_epochs < start <= target_epochs):
+        raise ValueError("Require a positive checkpoint interval and a start after the original epoch")
+    plan = _plan_locked(original, cache_dir, target_epochs - source_epochs)
+    last, restore = plan["last"], original
+    if previous is not None:
+        old_run = read_json(previous / "run.json")
+        old_budget = old_run["config"]["epochs"]
+        if type(old_budget) is not int or not source_epochs < old_budget < target_epochs:
+            raise ValueError("Previous continuation must extend the original and precede the new target")
+        old_cfg = {**plan["config"], "epochs": old_budget}
+        old_provenance = {**plan["provenance"], "target_epochs": old_budget,
+                          "additional_epochs": old_budget - source_epochs}
+        expected = _reconfigure_plan(plan, old_cfg, old_provenance, plan["last"])
+        if (old_run != expected["run"] or read_json(previous / "config.json") != old_cfg
+                or read_json(previous / "continuation.json") != old_provenance):
+            raise ValueError("Previous continuation config, signature or provenance differs from the original")
+        last = load_tensor(previous / "last.pt")
+        _validate_resume_state(last, old_run, source_epochs, old_budget)
+        if last.get("continuation", old_provenance) != old_provenance:
+            raise ValueError("Previous checkpoint has incompatible continuation provenance")
+        history = last["history"]
+        published = read_json(previous / "history.json")
+        if (history[:source_epochs] != plan["last"]["history"] or not isinstance(published, list)
+                or not source_epochs <= len(published) <= len(history) or published != history[:len(published)]):
+            raise ValueError("Previous checkpoint history does not preserve the original history prefix")
+        # A prepared fork has no trainer lock yet. Accept that state only before
+        # any new epoch, with every resume payload still identical to the base.
+        if not (previous / ".train.lock").exists() and (
+            len(history) != source_epochs or any(not _same_state(last[key], value)
+                for key, value in plan["last"].items() if key not in {"signature", "continuation"})
+        ):
+            raise ValueError("A trained previous continuation is missing its trainer lock")
+        restore = previous
+    cfg = {**plan["config"], "checkpoint_every_epochs": every, "checkpoint_start_epoch": start}
+    _check_config(cfg)
+    provenance = {**plan["provenance"], "restore_output": str(restore), "restored_epoch": len(last["history"]),
+                  "restore_sha256": {name: file_hash(restore / name) for name in
+                      ("run.json", "last.pt", "history.json", "config.json", "continuation.json")
+                      if (restore / name).is_file()},
+                  "checkpoint_every_epochs": every, "checkpoint_start_epoch": start}
+    return _reconfigure_plan(plan, cfg, provenance, last)
+
+
+@contextmanager
+def _retarget_sources(original, previous):
+    with ExitStack() as stack:
+        original = stack.enter_context(_locked_source(original))
+        if previous is not None:
+            previous = Path(previous).resolve(strict=True)
+            if previous == original:
+                raise ValueError("Use previous=None to restore directly from the original run")
+            previous = stack.enter_context(_locked_source(previous, required=False))
+        yield original, previous
+
+
+def plan_retarget_continuation(original, previous, cache_dir, target_epochs=500,
+                               checkpoint_every_epochs=50, checkpoint_start_epoch=150):
+    """Read a base run and optional stopped continuation, preserving both verbatim.
+
+    The caller must exclude the previous launcher's startup while inspecting a
+    prepared fork without a trainer lock. Existing trainer locks are enforced.
+    A durable last.pt newer than history.json is accepted only for a matching
+    history prefix, as when a process stops between the two atomic publications.
+    """
+    with _retarget_sources(original, previous) as (original, previous):
+        return _plan_retarget_locked(original, previous, cache_dir, target_epochs,
+                                     checkpoint_every_epochs, checkpoint_start_epoch)
+
+
+def prepare_retarget_continuation(original, previous, output, cache_dir, target_epochs=500,
+                                  checkpoint_every_epochs=50, checkpoint_start_epoch=150):
+    """Atomically fork the latest validated full state into a fresh run directory."""
+    output = Path(output).absolute()
+    if output.exists() or output.is_symlink():
+        raise FileExistsError(f"Continuation output already exists: {output}")
+    output = output.resolve()
+    with _retarget_sources(original, previous) as (original, previous):
+        if any(output == source or source in output.parents for source in (original, previous) if source):
+            raise ValueError("Continuation output must be outside both source runs")
+        plan = _plan_retarget_locked(original, previous, cache_dir, target_epochs,
+                                     checkpoint_every_epochs, checkpoint_start_epoch)
+        _publish_plan(output, plan)
         return plan

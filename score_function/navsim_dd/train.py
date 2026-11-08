@@ -70,6 +70,15 @@ def _check_config(cfg):
         raise ValueError("precision must be '32-true' or '16-mixed'")
     if type(cfg.get("drop_last", True)) is not bool:
         raise ValueError("drop_last must be a boolean")
+    if "checkpoint_every_epochs" in cfg:
+        interval = cfg["checkpoint_every_epochs"]
+        if type(interval) is not int or interval <= 0:
+            raise ValueError("checkpoint_every_epochs must be a positive integer")
+        start = cfg.get("checkpoint_start_epoch", interval)
+        if type(start) is not int or start <= 0:
+            raise ValueError("checkpoint_start_epoch must be a positive integer")
+    elif "checkpoint_start_epoch" in cfg:
+        raise ValueError("checkpoint_start_epoch requires checkpoint_every_epochs")
     if cfg["lr_schedule"] == "dd_warmup_cosine":
         minimum = cfg.get("min_learning_rate")
         if minimum is None or not math.isfinite(minimum) or not 0 <= minimum <= cfg["learning_rate"]:
@@ -237,14 +246,23 @@ def train(cache_dir, output, cfg, device, *, resume=False):
                 atomic_write(output / "best_ema.pt", best_export, tensor=True)
                 if ema is None:
                     atomic_write(output / "best_raw.pt", best_export, tensor=True)
-            if final:
-                final_export = {
+            interval = cfg.get("checkpoint_every_epochs")
+            start = cfg.get("checkpoint_start_epoch", interval)
+            periodic = interval is not None and epoch >= start and (epoch - start) % interval == 0
+            if final or periodic:
+                current_export = {
                     **common, "state_dict": validation_model.state_dict(), "epoch": epoch,
                     "val_dsm": history[-1]["val_dsm"],
                 }
-                atomic_write(output / "final_ema.pt", final_export, tensor=True)
+            if periodic:
+                # last.pt has already committed this epoch. This same path runs
+                # on resume, repairing a snapshot interrupted after that commit.
+                atomic_write(output / "checkpoints" / f"epoch_{epoch:04d}_{weight_kind}.pt",
+                             current_export, tensor=True)
+            if final:
+                atomic_write(output / "final_ema.pt", current_export, tensor=True)
                 if ema is None:
-                    atomic_write(output / "final_raw.pt", final_export, tensor=True)
+                    atomic_write(output / "final_raw.pt", current_export, tensor=True)
 
         if resume and history:
             # Republish even when last.pt was committed just before the job stopped.

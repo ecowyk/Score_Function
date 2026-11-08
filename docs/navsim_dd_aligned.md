@@ -91,28 +91,41 @@ nohup /home/data/wyk/envs/diffusion_drive/bin/python -u \
 差值 −0.0762 分；改善/退化/持平为 4066/3793/4287。它仍未超过固定 K0，
 因此后续训练的效果要以新 checkpoint 的 K20 评测判断。
 
-追加 150 轮的入口为 `scripts/continue_navsim_dd_aligned.py`。它从已完成的
-`dd_score_ddaligned_v1/last.pt` 完整恢复，训练到总计 250 轮，输出为
-`dd_score_ddaligned_v1_e250`。原 100 轮目录保留。恢复内容包含 raw 参数、AdamW
+追加 400 轮的入口为 `scripts/continue_navsim_dd_aligned.py`。它从已完成的
+`dd_score_ddaligned_v1/last.pt` 完整恢复，训练到总计 500 轮，输出为
+`dd_score_ddaligned_v1_e500`。原 100 轮目录保留。恢复内容包含 raw 参数、AdamW
 状态、GradScaler、各 rank RNG、历史与 best 权重；不能用 `final_raw.pt` 代替完整断点。
 
 原 100 轮 cosine 的最后一轮 LR 约为 `1.157067e-6`，下一轮自然到达下限
-`1e-6`。续训配置以 `lr_schedule_epochs=100` 保留该曲线，101–250 轮固定
-`1e-6`，不重新 warmup。它是低学习率续训，不等同于从头训练 250 轮的 cosine
+`1e-6`。续训配置以 `lr_schedule_epochs=100` 保留该曲线，101–500 轮固定
+`1e-6`，不重新 warmup。它是低学习率续训，不等同于从头训练 500 轮的 cosine
 实验。直接把原 cosine 的 horizon 改成 250 会使第 101 轮 LR 回升到约
 `3.99547e-4`，因此普通 `--resume --epochs 250` 仍会被配置签名检查拒绝。
 
 ```bash
-/home/data/wyk/envs/diffusion_drive/bin/python scripts/continue_navsim_dd_aligned.py check
 nohup /home/data/wyk/envs/diffusion_drive/bin/python -u \
   scripts/continue_navsim_dd_aligned.py run \
-  >> /home/data/wyk/dataset/navsim/exp/dd_score_ddaligned_v1_e250.log \
+  >> /home/data/wyk/dataset/navsim/exp/dd_score_ddaligned_v1_e500.log \
   2>&1 < /dev/null &
 python3 scripts/continue_navsim_dd_aligned.py status
 ```
 
-首次运行原子创建独立续训目录；重复执行相同 `run` 从该目录最近完整 epoch
-恢复，并用锁阻止重复启动。存在 `/dev/shm/wyk_dd_score_cache_v1/TRAINING_READY.json`
+若旧 `dd_score_ddaligned_v1_e250` 已准备或开始训练，`run` 会读取其最近完整
+epoch 的 `last.pt`，接着训练到总计 500，避免丢弃已完成进度。旧任务仍在本节点
+运行时，只向当前用户、命令行明确匹配该目录的 torchrun 父进程发送 SIGTERM，
+等锁释放后迁移；不完整的当前 epoch 会重做，旧目录保留。若锁在其他节点，
+需先在对应节点停止旧任务；脚本不会启动两个训练任务。
+
+首次运行原子创建独立续训目录；重复执行相同 `run` 从新目录最近完整 epoch
+恢复，并用锁阻止新旧任务重复启动。`check` 只做检查，不停止旧任务。
+存在 `/dev/shm/wyk_dd_score_cache_v1/TRAINING_READY.json`
 时优先使用该缓存，否则使用原 NFS 缓存；`SCORE_CACHE_DIR` 可显式指定。
 两种位置都必须与原训练缓存身份一致。完成后使用新目录的 `final_raw.pt`
 做 K20 评测，仍可复用先前的 K0。
+
+配置 `checkpoint_every_epochs=50`、`checkpoint_start_epoch=150`，按总 epoch 保存
+`checkpoints/epoch_0150_raw.pt`、`epoch_0200_raw.pt`……`epoch_0500_raw.pt`，每个均可直接
+用于 Score 推理。`last.pt` 仍每轮更新完整恢复状态，500 轮另保存 `final_raw.pt`。
+若在提交 `last.pt` 后写快照失败，恢复会先补写该轮快照。若旧 250 轮任务已经
+跑过某个保存点，却没有保存当时权重，无法凭最新断点补造过去的 checkpoint；
+新任务将从恢复位置继续按上述周期保存。
