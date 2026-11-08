@@ -74,8 +74,11 @@ def _check_config(cfg):
         minimum = cfg.get("min_learning_rate")
         if minimum is None or not math.isfinite(minimum) or not 0 <= minimum <= cfg["learning_rate"]:
             raise ValueError("min_learning_rate must be finite and between zero and learning_rate")
-        if not 0 < cfg["warmup_epochs"] < cfg["epochs"]:
-            raise ValueError("DD cosine requires 0 < warmup_epochs < epochs")
+        horizon = cfg.get("lr_schedule_epochs", cfg["epochs"])
+        if type(horizon) is not int or not 0 < cfg["warmup_epochs"] < horizon <= cfg["epochs"]:
+            raise ValueError("DD cosine requires 0 < warmup_epochs < lr_schedule_epochs <= epochs")
+    elif "lr_schedule_epochs" in cfg:
+        raise ValueError("lr_schedule_epochs is only valid for dd_warmup_cosine")
 
 
 @contextmanager

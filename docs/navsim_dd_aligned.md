@@ -86,3 +86,33 @@ nohup /home/data/wyk/envs/diffusion_drive/bin/python -u \
 八个分片全部成功后才合并，并要求覆盖 12,146 个场景。评测会创建独立输出目录，启动信息和进度持续写入上述日志。再次执行 `status` 可查看进度或完整评分，并在存在历史结果时显示与旧配置 100/200 轮评测的汇总对照。结果仍包含标明复用的 K0，用于逐场景计算 K20−K0、改善/退化/持平数量。
 
 检查结果时确认场景覆盖完整，核对 K0 基线，再看 K20−K0 是否为正。历史汇总 K0 相等只能作为快速核对，严格的逐场景一致性仍需比较保存的 token 和原始轨迹。仅验证 DSM 降低不能替代 PDMS 配对评测。
+
+100 轮对齐版的用户回传结果为 12,146 场景，复用 K0=88.0337，K20=87.9575，
+差值 −0.0762 分；改善/退化/持平为 4066/3793/4287。它仍未超过固定 K0，
+因此后续训练的效果要以新 checkpoint 的 K20 评测判断。
+
+追加 150 轮的入口为 `scripts/continue_navsim_dd_aligned.py`。它从已完成的
+`dd_score_ddaligned_v1/last.pt` 完整恢复，训练到总计 250 轮，输出为
+`dd_score_ddaligned_v1_e250`。原 100 轮目录保留。恢复内容包含 raw 参数、AdamW
+状态、GradScaler、各 rank RNG、历史与 best 权重；不能用 `final_raw.pt` 代替完整断点。
+
+原 100 轮 cosine 的最后一轮 LR 约为 `1.157067e-6`，下一轮自然到达下限
+`1e-6`。续训配置以 `lr_schedule_epochs=100` 保留该曲线，101–250 轮固定
+`1e-6`，不重新 warmup。它是低学习率续训，不等同于从头训练 250 轮的 cosine
+实验。直接把原 cosine 的 horizon 改成 250 会使第 101 轮 LR 回升到约
+`3.99547e-4`，因此普通 `--resume --epochs 250` 仍会被配置签名检查拒绝。
+
+```bash
+/home/data/wyk/envs/diffusion_drive/bin/python scripts/continue_navsim_dd_aligned.py check
+nohup /home/data/wyk/envs/diffusion_drive/bin/python -u \
+  scripts/continue_navsim_dd_aligned.py run \
+  >> /home/data/wyk/dataset/navsim/exp/dd_score_ddaligned_v1_e250.log \
+  2>&1 < /dev/null &
+python3 scripts/continue_navsim_dd_aligned.py status
+```
+
+首次运行原子创建独立续训目录；重复执行相同 `run` 从该目录最近完整 epoch
+恢复，并用锁阻止重复启动。存在 `/dev/shm/wyk_dd_score_cache_v1/TRAINING_READY.json`
+时优先使用该缓存，否则使用原 NFS 缓存；`SCORE_CACHE_DIR` 可显式指定。
+两种位置都必须与原训练缓存身份一致。完成后使用新目录的 `final_raw.pt`
+做 K20 评测，仍可复用先前的 K0。

@@ -54,14 +54,17 @@ def learning_rate_at_step(cfg, step, updates_per_epoch, next_lr):
         # not during the last training epoch (index 99).
         if updates_per_epoch < 1 or step < 0:
             raise ValueError("Require positive updates_per_epoch and nonnegative step")
-        epoch = min(step // updates_per_epoch, cfg["epochs"])
+        # An explicit continuation can extend the training budget while keeping
+        # the original cosine horizon. Past that horizon, retain min_lr.
+        horizon = cfg.get("lr_schedule_epochs", cfg["epochs"])
         warmup = cfg["warmup_epochs"]
-        if not 0 < warmup < cfg["epochs"]:
-            raise ValueError("DD cosine requires 0 < warmup_epochs < epochs")
+        if type(horizon) is not int or not 0 < warmup < horizon <= cfg["epochs"]:
+            raise ValueError("DD cosine requires 0 < warmup_epochs < lr_schedule_epochs <= epochs")
+        epoch = min(step // updates_per_epoch, horizon)
         peak, minimum = cfg["learning_rate"], cfg["min_learning_rate"]
         if epoch < warmup:
             return peak * (epoch + 1) / warmup
-        phase = (epoch - warmup) / (cfg["epochs"] - warmup)
+        phase = (epoch - warmup) / (horizon - warmup)
         return minimum + 0.5 * (peak - minimum) * (1 + math.cos(math.pi * phase))
     if schedule == "constant_after_warmup":
         epoch = step // updates_per_epoch
