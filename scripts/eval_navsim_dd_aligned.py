@@ -28,13 +28,43 @@ def atomic_write(path, text):
     temporary.replace(path)
 
 
-def expected_config():
-    return read_json(REPO / "configs/navsim_dd_s10_g_ddaligned.json")
+def expected_config(epochs=100):
+    config = read_json(REPO / "configs/navsim_dd_s10_g_ddaligned.json")
+    if epochs == 500:
+        config.update(epochs=500, lr_schedule_epochs=100,
+                      checkpoint_every_epochs=50, checkpoint_start_epoch=150)
+    elif epochs != 100:
+        raise ValueError("Supported final checkpoints: 100 or 500 epochs")
+    return config
 
 
-def validate_checkpoint(saved):
-    expected = dict(format="navsim-dd-score-v1", epoch=100, weight_kind="raw",
-                    sigma=0.1, gamma=0.1, training_precision="16-mixed", model=expected_config()["model"])
+def training_directory(root, epochs=100):
+    expected_config(epochs)
+    name = "dd_score_ddaligned_v1" if epochs == 100 else "dd_score_ddaligned_v1_e500"
+    return root / "dataset/navsim/exp" / name
+
+
+def latest_pointer(epochs=100):
+    expected_config(epochs)
+    return LATEST if epochs == 100 else "dd_score_ddaligned_e500_eval_latest.txt"
+
+
+def validate_training(run, history, epochs=100):
+    if len(history) != epochs or [row.get("epoch") for row in history] != list(range(1, epochs + 1)):
+        raise ValueError(f"Training is incomplete: require all {epochs} completed epochs")
+    config = {key: value for key, value in run.get("config", {}).items() if key != "num_workers"}
+    expected = {key: value for key, value in expected_config(epochs).items() if key != "num_workers"}
+    if config != expected:
+        raise ValueError(f"Training config mismatch for the aligned {epochs}-epoch run")
+    if (run.get("protocol", {}).get("world_size") != SHARDS
+            or run.get("protocol", {}).get("device_type") != "cuda"
+            or run.get("global_batch") != 512):
+        raise ValueError("Require the aligned eight-GPU, global-batch-512 training run")
+
+
+def validate_checkpoint(saved, epochs=100):
+    expected = dict(format="navsim-dd-score-v1", epoch=epochs, weight_kind="raw",
+                    sigma=0.1, gamma=0.1, training_precision="16-mixed", model=expected_config(epochs)["model"])
     for name, value in expected.items():
         if saved.get(name) != value:
             raise ValueError(f"Checkpoint {name}: expected {value!r}, got {saved.get(name)!r}")
@@ -51,22 +81,15 @@ def child_env(root):
     return env
 
 
-def preflight(root):
+def preflight(root, epochs=100):
     exp = root / "dataset/navsim/exp"
-    training = exp / "dd_score_ddaligned_v1"
+    training = training_directory(root, epochs)
     checkpoint = training / "final_raw.pt"
     if not checkpoint.is_file() or not (training / "history.json").is_file():
-        raise ValueError("Training is incomplete: require history epoch 100 and final_raw.pt")
+        raise ValueError(f"Training is incomplete: require history epoch {epochs} and {checkpoint}")
     history = read_json(training / "history.json")
-    if not history or history[-1].get("epoch") != 100 or not checkpoint.is_file():
-        raise ValueError("Training is incomplete: require history epoch 100 and final_raw.pt")
     run = read_json(training / "run.json")
-    expected = expected_config()
-    for key, value in expected.items():
-        if key != "num_workers" and run.get("config", {}).get(key) != value:
-            raise ValueError(f"Training config mismatch: {key}")
-    if run.get("protocol", {}).get("world_size") != SHARDS or run.get("global_batch") != 512:
-        raise ValueError("Require the aligned eight-GPU, global-batch-512 training run")
+    validate_training(run, history, epochs)
     pointer = exp / "dd_score_e200_eval_latest.txt"
     if not pointer.is_file():
         raise ValueError(f"Missing completed E200 evaluation pointer: {pointer}; K0 will not be recomputed")
@@ -86,7 +109,7 @@ def preflight(root):
     if Path(sys.executable).resolve() != (root / "envs/diffusion_drive/bin/python").resolve():
         raise ValueError(f"Run with {root}/envs/diffusion_drive/bin/python")
     import torch
-    validate_checkpoint(torch.load(checkpoint, map_location="cpu", weights_only=True))
+    validate_checkpoint(torch.load(checkpoint, map_location="cpu", weights_only=True), epochs)
     if not torch.cuda.is_available() or torch.cuda.device_count() != SHARDS:
         raise ValueError("Require exactly eight visible CUDA GPUs; check CUDA_VISIBLE_DEVICES")
     return checkpoint, baseline
@@ -129,13 +152,21 @@ def print_summary(output):
     summary = read_json(output / "summary.json")
     k0, k20 = (summary["by_k"][k] for k in ("0", "20"))
     a, b = k0["mean"]["score"] * 100, k20["mean"]["score"] * 100
-    print(f"Aligned 100 epoch RAW: {summary['count']} scenes; reused K0 {a:.4f}; "
+    launcher = read_json(output / "launcher.json") if (output / "launcher.json").is_file() else {}
+    epochs = launcher.get("epochs", 100)
+    print(f"Aligned {epochs} epoch RAW: {summary['count']} scenes; reused K0 {a:.4f}; "
           f"new K20 {b:.4f}; delta {b-a:+.4f} points", flush=True)
     print(f"K20 improved {k20['improved']}, worsened {k20['worsened']}, tied {k20['tied']}", flush=True)
-    for pointer, label in (("dd_score_final_eval_latest.txt", "Previous 100 epoch EMA"),
-                           ("dd_score_e200_eval_latest.txt", "Previous 200 epoch EMA")):
+    comparisons = [("dd_score_final_eval_latest.txt", "Previous 100 epoch EMA"),
+                   ("dd_score_e200_eval_latest.txt", "Previous 200 epoch EMA")]
+    if epochs == 500:
+        comparisons.append((LATEST, "Aligned 100 epoch RAW"))
+    for pointer, label in comparisons:
         try:
-            old = read_json(Path((output.parent / pointer).read_text().strip()) / "summary.json")
+            old_output = Path((output.parent / pointer).read_text().strip())
+            if old_output.resolve() == output.resolve():
+                continue
+            old = read_json(old_output / "summary.json")
             if old["count"] != summary["count"]:
                 continue
             x, y = (old["by_k"][k]["mean"]["score"] * 100 for k in ("0", "20"))
@@ -162,7 +193,7 @@ def stop_children(children):
             child.wait()
 
 
-def run(root):
+def run(root, epochs=100):
     exp = root / "dataset/navsim/exp"
     exp.mkdir(parents=True, exist_ok=True)
     with (exp / "dd_score_ddaligned_eval.lock").open("a") as lock:
@@ -170,12 +201,13 @@ def run(root):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError("Another aligned evaluation runner is active") from None
-        checkpoint, baseline = preflight(root)
-        output = Path(tempfile.mkdtemp(prefix="dd_score_ddaligned_navtest_", dir=exp))
+        checkpoint, baseline = preflight(root, epochs)
+        prefix = "dd_score_ddaligned_navtest_" if epochs == 100 else "dd_score_ddaligned_e500_navtest_"
+        output = Path(tempfile.mkdtemp(prefix=prefix, dir=exp))
         state = dict(status="running", pid=os.getpid(), host=socket.gethostname(),
-                     checkpoint=str(checkpoint), baseline=str(baseline), started=time.time())
+                     checkpoint=str(checkpoint), epochs=epochs, baseline=str(baseline), started=time.time())
         atomic_write(output / "launcher.json", json.dumps(state, indent=2) + "\n")
-        atomic_write(exp / LATEST, str(output) + "\n")
+        atomic_write(exp / latest_pointer(epochs), str(output) + "\n")
         children, previous = [], {}
         def interrupted(signum, frame):
             raise InterruptedError(f"Received signal {signum}")
@@ -231,13 +263,13 @@ def run(root):
         return output
 
 
-def status(root):
+def status(root, epochs=100):
     exp = root / "dataset/navsim/exp"
-    training = exp / "dd_score_ddaligned_v1"
+    training = training_directory(root, epochs)
     history = read_json(training / "history.json") if (training / "history.json").is_file() else []
-    print(f"Training epoch {history[-1]['epoch'] if history else 0}/100; "
+    print(f"Training epoch {history[-1]['epoch'] if history else 0}/{epochs}; "
           f"final_raw.pt: {'present' if (training / 'final_raw.pt').is_file() else 'absent'}")
-    pointer = exp / LATEST
+    pointer = exp / latest_pointer(epochs)
     if not pointer.is_file():
         print("尚未启动评测")
         return
@@ -254,9 +286,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["run", "status"])
     parser.add_argument("--root", type=Path, default=Path("/home/data/wyk"))
+    parser.add_argument("--epochs", type=int, choices=[100, 500], default=100,
+                        help="completed aligned training run whose final_raw.pt is evaluated")
     args = parser.parse_args()
     try:
-        (run if args.action == "run" else status)(args.root.resolve())
+        (run if args.action == "run" else status)(args.root.resolve(), args.epochs)
     except (OSError, ValueError, RuntimeError, KeyError) as error:
         parser.exit(1, f"Error: {error}\n")
 

@@ -27,10 +27,10 @@ def write_json(path, value):
     path.write_text(json.dumps(value) + "\n", encoding="utf-8")
 
 
-def checkpoint_metadata():
+def checkpoint_metadata(epochs=100):
     config = json.loads((REPOSITORY / "configs/navsim_dd_s10_g_ddaligned.json").read_text())
     return {
-        "format": "navsim-dd-score-v1", "epoch": 100, "weight_kind": "raw",
+        "format": "navsim-dd-score-v1", "epoch": epochs, "weight_kind": "raw",
         "sigma": 0.1, "gamma": 0.1, "training_precision": "16-mixed",
         "model": config["model"],
     }
@@ -44,6 +44,36 @@ class AlignedEvaluationRunnerTests(unittest.TestCase):
             with self.subTest(change=change):
                 with self.assertRaises((ValueError, RuntimeError)):
                     runner.validate_checkpoint({**valid, **change})
+
+    def test_500_checkpoint_requires_final_epoch_raw_weights_and_original_model(self):
+        valid = checkpoint_metadata(500)
+        runner.validate_checkpoint(valid, epochs=500)
+        for change in (
+            {"epoch": 100}, {"epoch": 450}, {"weight_kind": "ema"},
+            {"training_precision": "32-true"}, {"model": {**valid["model"], "input_dim": 3}},
+        ):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                runner.validate_checkpoint({**valid, **change}, epochs=500)
+        with self.assertRaises(ValueError):
+            runner.validate_checkpoint(valid)  # The existing default still selects epoch 100.
+
+    def test_500_training_guard_requires_original_cosine_horizon_and_complete_history(self):
+        config = json.loads((REPOSITORY / "configs/navsim_dd_s10_g_ddaligned.json").read_text())
+        config.update(epochs=500, lr_schedule_epochs=100,
+                      checkpoint_every_epochs=50, checkpoint_start_epoch=150)
+        history = [{"epoch": epoch} for epoch in range(1, 501)]
+        run = {"config": config, "protocol": {"world_size": 8, "device_type": "cuda"}, "global_batch": 512}
+        runner.validate_training(run, history, epochs=500)
+        runner.validate_training({**run, "config": {**config, "num_workers": 0}}, history, epochs=500)
+        for change in (
+            {"epochs": 250}, {"lr_schedule_epochs": 500}, {"ema_decay": 0.999},
+            {"checkpoint_every_epochs": 100}, {"checkpoint_start_epoch": 100},
+        ):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "config mismatch"):
+                runner.validate_training({**run, "config": {**config, **change}}, history, epochs=500)
+        for incomplete in (history[:-1], [{"epoch": 500}], [history[1], history[0], *history[2:]]):
+            with self.subTest(history_length=len(incomplete)), self.assertRaisesRegex(ValueError, "incomplete"):
+                runner.validate_training(run, incomplete, epochs=500)
 
     def test_progress_counts_one_file_and_only_complete_newline_records(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -106,10 +136,85 @@ class AlignedEvaluationRunnerTests(unittest.TestCase):
             self.assertIn("Scenes 1/12146", shown)
             self.assertNotIn("new K20", shown)
 
+    def test_500_status_reads_its_own_training_run_and_pointer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            exp = root / "dataset/navsim/exp"
+            old_output, output = exp / "old100-evaluation", exp / "new500-evaluation"
+            for epochs, name, evaluation in (
+                (100, "dd_score_ddaligned_v1", old_output),
+                (500, "dd_score_ddaligned_v1_e500", output),
+            ):
+                training = exp / name
+                write_json(training / "history.json", [{"epoch": epochs}])
+                (training / "final_raw.pt").touch()
+                write_json(evaluation / "launcher.json", {"epochs": epochs, "status": f"running-{epochs}"})
+            self.assertEqual(runner.latest_pointer(), runner.LATEST)
+            self.assertEqual(runner.latest_pointer(500), "dd_score_ddaligned_e500_eval_latest.txt")
+            (exp / runner.LATEST).write_text(str(old_output) + "\n", encoding="utf-8")
+            (exp / runner.latest_pointer(500)).write_text(str(output) + "\n", encoding="utf-8")
+            part = output / "part-0000-of-0008"
+            part.mkdir()
+            (part / "scenes.jsonl.tmp").write_text('{"token":"a"}\n{"token":"b"}\n', encoding="utf-8")
+            stream = io.StringIO()
+            with patch.object(runner.subprocess, "Popen") as spawn, contextlib.redirect_stdout(stream):
+                runner.status(root, epochs=500)
+            spawn.assert_not_called()
+            shown = stream.getvalue()
+            self.assertIn("500/500", shown)
+            self.assertIn(str(output), shown)
+            self.assertIn("running-500", shown)
+            self.assertIn("Scenes 2/12146", shown)
+            self.assertNotIn(str(old_output), shown)
+            self.assertNotIn("running-100", shown)
+
+    def test_500_summary_labels_current_weights_and_compares_aligned_100(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            exp = Path(temporary)
+            output, previous = exp / "evaluation500", exp / "evaluation100"
+            for directory, k20 in ((output, 0.90), (previous, 0.89)):
+                write_json(directory / "summary.json", {
+                    "count": 193, "score_scale": "0..1",
+                    "by_k": {
+                        "0": {"mean": {"score": 0.88}, "mean_delta": {"score": 0},
+                              "improved": 0, "worsened": 0, "tied": 193},
+                        "20": {"mean": {"score": k20}, "mean_delta": {"score": k20 - 0.88},
+                               "improved": 20, "worsened": 10, "tied": 163},
+                    },
+                })
+            write_json(output / "launcher.json", {"epochs": 500})
+            (exp / runner.LATEST).write_text(str(previous) + "\n", encoding="utf-8")
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                runner.print_summary(output)
+            shown = stream.getvalue()
+            self.assertIn("Aligned 500 epoch RAW", shown)
+            self.assertIn("new K20 90.0000", shown)
+            self.assertIn("Aligned 100 epoch RAW: K0 88.0000, K20 89.0000", shown)
+            self.assertIn("K20 +1.0000 points", shown)
+            self.assertIn("means only, not a paired comparison", shown)
+
+    def test_failed_500_preflight_creates_no_pointer_or_workers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            exp = root / "dataset/navsim/exp"
+            exp.mkdir(parents=True)
+            previous_pointer = exp / runner.LATEST
+            previous_pointer.write_text("/fixture/completed100\n", encoding="utf-8")
+            with (patch.object(runner, "preflight", side_effect=ValueError("incomplete epoch 500")) as check,
+                  patch.object(runner.subprocess, "Popen") as spawn):
+                with self.assertRaisesRegex(ValueError, "incomplete epoch 500"):
+                    runner.run(root, epochs=500)
+            check.assert_called_once_with(root, 500)
+            spawn.assert_not_called()
+            self.assertEqual(previous_pointer.read_text(), "/fixture/completed100\n")
+            self.assertFalse((exp / runner.latest_pointer(500)).exists())
+            self.assertFalse(any(path.is_dir() for path in exp.iterdir()))
+
     def test_worker_command_reuses_existing_k0_and_requests_only_new_k20(self):
         root = Path("/fixture/project")
         output = root / "output"
-        checkpoint = root / "final_raw.pt"
+        checkpoint = root / "dataset/navsim/exp/dd_score_ddaligned_v1_e500/final_raw.pt"
         baseline = root / "completed-e200"
         command = runner.worker_command(root, output, checkpoint, baseline, 3)
         self.assertIn("score_function.navsim_dd.evaluate", command)

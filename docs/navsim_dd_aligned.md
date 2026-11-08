@@ -129,3 +129,21 @@ epoch 的 `last.pt`，接着训练到总计 500，避免丢弃已完成进度。
 若在提交 `last.pt` 后写快照失败，恢复会先补写该轮快照。若旧 250 轮任务已经
 跑过某个保存点，却没有保存当时权重，无法凭最新断点补造过去的 checkpoint；
 新任务将从恢复位置继续按上述周期保存。
+
+500 轮完成后，评测新目录中的 `final_raw.pt`：
+
+```bash
+nohup /home/data/wyk/envs/diffusion_drive/bin/python -u \
+  scripts/eval_navsim_dd_aligned.py run --epochs 500 \
+  >> /home/data/wyk/dataset/navsim/exp/dd_score_ddaligned_e500_eval.log \
+  2>&1 < /dev/null &
+python3 scripts/eval_navsim_dd_aligned.py status --epochs 500
+```
+
+`--epochs 500` 检查连续完整的 500 轮 history、延续原 100 轮 cosine 的配置及
+最终 RAW checkpoint 的 epoch/模型/精度元数据。八卡只重新计算 K20，仍按场景
+复用旧 E200 评测中的 K0 轨迹和分数，seed=20260922、gamma=0.1。
+输出采用独立目录 `dd_score_ddaligned_e500_navtest_*`，指针为
+`dd_score_ddaligned_e500_eval_latest.txt`。原 100 轮结果指针保持原值，500 轮汇总
+会在其存在时额外报告与对齐版 100 轮 K20 的均值差。运行与查看均需传
+`--epochs 500`；省略该选项仍指向原 100 轮评测。
