@@ -147,3 +147,31 @@ python3 scripts/eval_navsim_dd_aligned.py status --epochs 500
 `dd_score_ddaligned_e500_eval_latest.txt`。原 100 轮结果指针保持原值，500 轮汇总
 会在其存在时额外报告与对齐版 100 轮 K20 的均值差。运行与查看均需传
 `--epochs 500`；省略该选项仍指向原 100 轮评测。
+
+500 轮评测完成后，选择改善与退化各五个场景并生成左右同步动图：
+
+```bash
+nohup /home/data/wyk/envs/diffusion_drive/bin/python -u \
+  scripts/visualize_navsim_dd.py run \
+  >> /home/data/wyk/dataset/navsim/exp/dd_score_ddaligned_e500_visuals.log \
+  2>&1 < /dev/null &
+python3 scripts/visualize_navsim_dd.py status
+```
+
+入口读取 `dd_score_ddaligned_e500_eval_latest.txt` 指向的已完成结果，核对全部
+12,146 个 token、分片与汇总。按 PDMS 差值分别降序选择改善和退化场景，
+优先选择不同日志；分差并列时按日志和 token 排序。选例属于定向诊断，不代表
+总体统计。`selection.json` 记录分数、选择规则、原始轨迹、评测协议和来源摘要。
+
+不重新运行 DD 或 Score 模型。对这十个场景保存的 K0/K20 轨迹分别调用官方
+PDM 控制器和评分器，核对每个子项与原评测一致后，使用实际模拟车身和周车
+位置绘制。左侧 K0、右侧 K20，同时间同尺度，始终展示浅绿色可行驶区域和
+深绿色边界。两侧分别在发生帧以红色空心圆标注越界角点和碰撞位置。
+专家轨迹从原始场景 metadata 读取，不能用 metric cache 中的 PDM 参考轨迹
+代替。仅载入 metadata 和 metric cache，不读取相机或 LiDAR 文件，也不占 GPU。
+
+输出为独立的 `dd_score_ddaligned_e500_visuals_*` 目录，包含 `I01`–`I05`、
+`D01`–`D05` 的 GIF、PNG、逐帧 JSON 和 `index.html` 总览。新目录记录在
+`dd_score_ddaligned_e500_visuals_latest.txt`。每例完成后更新状态和总览，
+单例失败仍继续其余案例，但整体状态会标记失败，不把缺失案例当成完成。
+将整个输出目录下载到本机后打开 `index.html`，可逐例播放并查看分项。
