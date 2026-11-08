@@ -88,7 +88,7 @@ def native_top1(agent, features):
     return raw, index
 
 
-def score_pose_group(raw, steps, refiner, context, global_context, gamma, scorer, device):
+def score_pose_group(raw, steps, refiner, context, global_context, gamma, scorer, device, *, baseline_metrics=None):
     """Every arm starts from exactly the same raw tensor; K0 performs no conversion."""
     trajectories, scores = {}, {}
     if steps == [0]:
@@ -104,7 +104,8 @@ def score_pose_group(raw, steps, refiner, context, global_context, gamma, scorer
         if prediction.shape != (1, 8, 3) or not torch.isfinite(prediction).all():
             raise ValueError(f"Invalid trajectory for K={k}")
         array = prediction.detach().cpu().numpy()[0]
-        metrics = {name: float(value) for name, value in scorer(array).items()}
+        values = baseline_metrics if k == 0 and baseline_metrics is not None else scorer(array)
+        metrics = {name: float(value) for name, value in values.items()}
         if 'score' not in metrics or not all(math.isfinite(value) for value in metrics.values()):
             raise ValueError(f"Invalid PDM subscore for K={k}: {metrics}")
         trajectories[k], scores[k] = array.tolist(), metrics
@@ -138,6 +139,70 @@ def dump_json(path, value):
 
 def digest_tokens(tokens):
     return hashlib.sha256('\n'.join(tokens).encode()).hexdigest()
+
+
+def load_reusable_k0(source, expected_run, selected, needed=None):
+    """Read a completed baseline without modifying it; reject changed protocols."""
+    source = Path(source).resolve()
+    summary = json.loads((source / 'summary.json').read_text())
+    if summary.get('count') != len(selected) or '0' not in summary.get('by_k', {}):
+        raise ValueError('Reusable K0 needs a completed summary for the full selected split')
+    required = set(selected if needed is None else needed)
+    records, observed, ids, hashes = {}, [], set(), {}
+    original = None
+    score_sum = 0.0
+    compatible = ('split', 'seed', 'identity', 'token_digest', 'count',
+                  'data_root', 'max_scenes', 'metric_cache')
+    for directory in sorted(source.glob('part-*-of-*')):
+        manifest = json.loads((directory / 'complete.json').read_text())
+        if json.loads((directory / 'run.json').read_text()) != manifest:
+            raise ValueError(f'Baseline run/completion manifest mismatch: {directory}')
+        run = manifest['run']
+        if original is None:
+            original = run
+            for key in compatible:
+                if key not in run or key not in expected_run or run[key] != expected_run[key]:
+                    raise ValueError(f'Cannot reuse K0: {key} differs from the completed baseline')
+            if 0 not in run['ks']:
+                raise ValueError('Baseline has no K0 arm')
+        index = manifest['shard_index']
+        if run != original or index in ids:
+            raise ValueError('Incompatible or duplicate baseline shards')
+        ids.add(index)
+        path = directory / 'scenes.jsonl'
+        digest, shard_tokens = hashlib.sha256(), []
+        with path.open('rb') as stream:
+            for line in stream:
+                digest.update(line)
+                row = json.loads(line)
+                token, trajectory, metrics = row['token'], row['trajectories']['0'], row['metrics']['0']
+                if row['seed'] != token_seed(run['seed'], token):
+                    raise ValueError(f'Baseline token seed mismatch: {token}')
+                if (len(trajectory) != 8 or any(len(pose) != 3 for pose in trajectory)
+                        or not all(math.isfinite(float(v)) for pose in trajectory for v in pose)
+                        or 'score' not in metrics or not all(math.isfinite(float(v)) for v in metrics.values())):
+                    raise ValueError(f'Invalid baseline trajectory/metrics: {token}')
+                shard_tokens.append(token)
+                score_sum += float(metrics['score'])
+                if token in required:
+                    if token in records:
+                        raise ValueError(f'Duplicate baseline token: {token}')
+                    records[token] = dict(trajectory=trajectory, metrics=metrics,
+                                          top1_index=row['top1_index'], seed=row['seed'])
+        if sorted(shard_tokens) != manifest['shard_tokens']:
+            raise ValueError(f'Incomplete baseline records: {directory}')
+        observed.extend(shard_tokens)
+        hashes[str(path.relative_to(source))] = digest.hexdigest()
+        hashes[str((directory / 'complete.json').relative_to(source))] = file_hash(directory / 'complete.json')
+    if (original is None or ids != set(range(original['num_shards']))
+            or sorted(observed) != sorted(selected) or len(set(observed)) != len(observed)
+            or digest_tokens(sorted(observed)) != expected_run['token_digest']
+            or set(records) != required):
+        raise ValueError('Incomplete reusable K0 token/shard coverage')
+    if not math.isclose(score_sum / len(observed), summary['by_k']['0']['mean']['score'], rel_tol=0, abs_tol=1e-12):
+        raise ValueError('Baseline K0 summary differs from its scene records')
+    return records, dict(source=str(source), files_sha256=hashes,
+                         summary_sha256=file_hash(source / 'summary.json'))
 
 
 def bounded_loader(scene_filter, available_logs, limit, load):
@@ -235,6 +300,8 @@ def parse_args(argv=None):
     parser.add_argument('--shard-index', type=int, default=0)
     parser.add_argument('--native-only', action='store_true', help='only evaluate the unchanged native trajectory')
     parser.add_argument('--verify-native', action='store_true', help='on the first token compare native and extracted conditions')
+    parser.add_argument('--reuse-k0-from', type=Path,
+                        help='reuse trajectories and K0 scores from a completed compatible paired evaluation')
     parser.add_argument('--merge', action='store_true', help='merge completed shards and check coverage')
     args = parser.parse_args(argv)
     if args.merge:
@@ -246,9 +313,13 @@ def parse_args(argv=None):
         parser.error('--gamma must be finite and nonnegative')
     if args.native_only and args.score_checkpoint:
         parser.error('use either --native-only or --score-checkpoint')
+    if args.native_only and args.reuse_k0_from:
+        parser.error('--reuse-k0-from requires a score checkpoint for a refined arm')
     if not args.native_only and not args.score_checkpoint:
         parser.error('supply --score-checkpoint or --native-only')
     args.ks = sorted(set(args.ks or ([0] if args.native_only else [0, 20])) | {0})
+    if args.reuse_k0_from and args.ks == [0]:
+        parser.error('--reuse-k0-from requires at least one nonzero refinement step')
     if args.ks[0] < 0 or (args.native_only and args.ks != [0]):
         parser.error('invalid steps for the requested evaluation')
     return args
@@ -274,6 +345,8 @@ def merge_shards(output):
     if ids != set(range(run['num_shards'])) or digest_tokens(sorted(row['token'] for row in rows)) != run['token_digest']:
         raise ValueError('Incomplete merged token coverage')
     report = summarize(rows)
+    if run.get('k0_reuse'):
+        report['k0_reuse'] = run['k0_reuse']
     dump_json(output / 'summary.json', report)
     print(json.dumps(report, indent=2))
     return report
@@ -314,6 +387,13 @@ def run(args):
                       data_root=str(args.data_root.resolve()), max_scenes=args.max_scenes,
                       score_checkpoint_sha256=file_hash(args.score_checkpoint) if refiner else None,
                       metric_cache=str(args.metric_cache.resolve()))
+    baseline = None
+    if args.reuse_k0_from is not None:
+        if args.reuse_k0_from.resolve() == args.output.resolve():
+            raise ValueError('Use a separate output directory when reusing K0')
+        baseline, provenance = load_reusable_k0(args.reuse_k0_from, run_config, selected, shard)
+        run_config['k0_reuse'] = provenance
+        print(f'Reusing {len(baseline)} K0 trajectories and scores from {args.reuse_k0_from}', flush=True)
     dest = args.output / f'part-{args.shard_index:04d}-of-{args.num_shards:04d}'
     dest.mkdir(parents=True, exist_ok=True)
     manifest = dict(run=run_config, shard_index=args.shard_index, shard_tokens=shard)
@@ -325,10 +405,10 @@ def run(args):
         if (dest / 'complete.json').exists():
             raise FileExistsError(f'Already complete: {dest}')
         dump_json(existing, manifest)
-        _run_shard(args, dest, shard, logs, agent, refiner, conditioner, cache, simulator, scorer, loader, manifest)
+        _run_shard(args, dest, shard, logs, agent, refiner, conditioner, cache, simulator, scorer, loader, manifest, baseline)
 
 
-def _run_shard(args, dest, shard, logs, agent, refiner, conditioner, cache, simulator, scorer, loader, manifest):
+def _run_shard(args, dest, shard, logs, agent, refiner, conditioner, cache, simulator, scorer, loader, manifest, baseline=None):
     from navsim.common.dataclasses import Trajectory
     from navsim.evaluate.pdm_score import pdm_score
     from .conditioner import features_from_input, verify_native_conditions
@@ -350,8 +430,14 @@ def _run_shard(args, dest, shard, logs, agent, refiner, conditioner, cache, simu
                             checks = verify_native_conditions(agent, features)
                     finally:
                         handle.remove()
-                with sampling_rng(seed, args.device):
-                    (raw, mode), native_ms = timed(lambda: native_top1(agent, features), args.device)
+                if baseline is None:
+                    with sampling_rng(seed, args.device):
+                        (raw, mode), native_ms = timed(lambda: native_top1(agent, features), args.device)
+                else:
+                    cached = baseline[token]
+                    raw = torch.tensor(cached['trajectory'], dtype=torch.float32, device=args.device)[None]
+                    mode, native_ms = cached['top1_index'], 0.0
+                    checks['k0_reused'] = True
                 if args.verify_native and i == 0:
                     if len(reference) != 1 or not torch.equal(reference[0], raw):
                         raise ValueError('K0 differs from the same-seed unmodified native forward')
@@ -370,7 +456,8 @@ def _run_shard(args, dest, shard, logs, agent, refiner, conditioner, cache, simu
                     return asdict(pdm_score(metric, Trajectory(poses), simulator.proposal_sampling, simulator, scorer))
 
                 trajectories, metrics, delta, refine_ms = score_pose_group(
-                    raw, args.ks, refiner, context, global_context, args.gamma, score, args.device)
+                    raw, args.ks, refiner, context, global_context, args.gamma, score, args.device,
+                    baseline_metrics=baseline[token]['metrics'] if baseline is not None else None)
                 row = dict(token=token, log=logs[token], seed=seed, top1_index=mode, trajectories=trajectories,
                            metrics=metrics, delta=delta, native_ms=native_ms, conditioner_ms=context_ms,
                            refine_ms=refine_ms, checks=checks)
@@ -381,6 +468,8 @@ def _run_shard(args, dest, shard, logs, agent, refiner, conditioner, cache, simu
             except Exception as exc:
                 raise RuntimeError(f'Paired evaluation failed at token {token}; shard is incomplete') from exc
     report = summarize(rows)
+    if manifest['run'].get('k0_reuse'):
+        report['k0_reuse'] = manifest['run']['k0_reuse']
     (dest / 'scenes.jsonl.tmp').replace(dest / 'scenes.jsonl')
     dump_json(dest / 'summary.json', report)
     dump_json(dest / 'complete.json', manifest)

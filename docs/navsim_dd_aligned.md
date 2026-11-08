@@ -65,3 +65,24 @@ nohup env SCORE_CACHE_DIR=/dev/shm/wyk_dd_score_cache_v1 \
 只复制 Score 条件缓存，主要张量约 3.2 GiB；无需复制完整 NAVSIM 传感器数据。`/dev/shm` 属于本节点/容器的临时内存存储，重启后若副本丢失，可重新复制后以 `--resume` 继续。checkpoint 和日志仍写入 `/home/data/wyk/dataset/navsim/exp`。
 
 每轮日志额外报告 rank 0 的 `elapsed`、`train`、`validation` 秒数；总耗时包含保存 checkpoint 与同步，训练阶段包含加载与通信。用多轮耗时比较 NFS 与本地缓存效果，不能仅凭 GPU 活跃率或一次验证变慢认定瓶颈。
+
+训练后的配对评测使用 `scripts/eval_navsim_dd_aligned.py`。先查看训练和评测状态：
+
+```bash
+python3 scripts/eval_navsim_dd_aligned.py status
+```
+
+完成 100 epoch 后，用原 Conda 环境启动八卡 navtest 评测：
+
+```bash
+nohup /home/data/wyk/envs/diffusion_drive/bin/python -u \
+  scripts/eval_navsim_dd_aligned.py run \
+  >> /home/data/wyk/dataset/navsim/exp/dd_score_ddaligned_eval.log \
+  2>&1 < /dev/null &
+```
+
+入口检查 `dd_score_ddaligned_v1/final_raw.pt` 的 epoch、raw 权重标记和噪声尺度。从 `dd_score_e200_eval_latest.txt` 指向的已完成评测中，按 token 复用 K0 的原始轨迹和各项分数，只重新计算新 Score 的 K20；参数固定为 seed=20260922、gamma=0.1。复用前核对 DD 资产身份、种子、数据及 metric cache 路径、全部 token、分片完整性和旧汇总分数，并将来源文件摘要记录到新结果。每个分片首场景保留一次原生前向一致性检查，不重新计算 K0 的 PDM 分数。
+
+八个分片全部成功后才合并，并要求覆盖 12,146 个场景。评测会创建独立输出目录，启动信息和进度持续写入上述日志。再次执行 `status` 可查看进度或完整评分，并在存在历史结果时显示与旧配置 100/200 轮评测的汇总对照。结果仍包含标明复用的 K0，用于逐场景计算 K20−K0、改善/退化/持平数量。
+
+检查结果时确认场景覆盖完整，核对 K0 基线，再看 K20−K0 是否为正。历史汇总 K0 相等只能作为快速核对，严格的逐场景一致性仍需比较保存的 token 和原始轨迹。仅验证 DSM 降低不能替代 PDMS 配对评测。
