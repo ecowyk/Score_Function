@@ -35,12 +35,48 @@ from score_function.utils.train_utils import (
 )
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "navsim_dd_s10_g.json"
+READER_ARCHITECTURE = "dd_scene_reader_score"
+READER_TRAIN_FORMAT = "navsim-dd-reader-train-v1"
+
+
+def is_reader_config(cfg):
+    return cfg["model"].get("architecture") == READER_ARCHITECTURE
+
+
+def load_training_data(cache_dir, cfg):
+    """Dispatch by the declared model, so old compressed caches cannot train the reader."""
+    if is_reader_config(cfg):
+        from score_function.navsim_dd.reader_cache import DDReaderDataset, load_reader_cache_metadata
+
+        metadata = load_reader_cache_metadata(cache_dir)
+        return metadata, DDReaderDataset(cache_dir, "train"), DDReaderDataset(cache_dir, "val")
+    metadata = load_cache_metadata(cache_dir)
+    return metadata, NavsimScoreDataset(cache_dir, "train"), NavsimScoreDataset(cache_dir, "val")
+
+
+def build_training_model(cfg, metadata, cache_dir, device):
+    """Load fixed DD reader weights once, before creating the trainable optimizer."""
+    if not is_reader_config(cfg):
+        return build_model(cfg, device)
+    from score_function.navsim_dd.reader import build_reader_score
+    from score_function.utils.train_utils import file_hash
+
+    root = Path(cache_dir).resolve()
+    record = metadata["reader_assets"]
+    path = (root / record["path"]).resolve()
+    if root not in path.parents or file_hash(path) != record["sha256"]:
+        raise ValueError("Frozen DD reader assets changed after cache publication")
+    assets = load_tensor(path)
+    if assets.get("spec") != record["spec"]:
+        raise ValueError("Frozen DD reader architecture differs from cache metadata")
+    return build_reader_score(cfg["model"], metadata["normalizer"], assets, device)
 
 
 def _check_config(cfg):
     model = cfg["model"]
+    if model.get("architecture") not in ("temporal_score_function", READER_ARCHITECTURE):
+        raise ValueError("Unsupported NAVSIM score architecture")
     for key, value in {
-        "architecture": "temporal_score_function",
         "parameterization": "score",
         "future_len": 8,
         "input_dim": 4,
@@ -129,9 +165,9 @@ def train(cache_dir, output, cfg, device, *, resume=False):
         raise ValueError("16-mixed training requires CUDA; use 32-true for CPU runs")
     output = Path(output)
     rank, world = ddp.rank(), ddp.world_size()
-    metadata = load_cache_metadata(cache_dir)
-    training = NavsimScoreDataset(cache_dir, "train")
-    validation = NavsimScoreDataset(cache_dir, "val")
+    metadata, training, validation = load_training_data(cache_dir, cfg)
+    reader = is_reader_config(cfg)
+    train_format = READER_TRAIN_FORMAT if reader else "navsim-dd-train-v1"
     batch_size = cfg["microbatch_size"] * world
     drop_last = cfg.get("drop_last", True)
     updates = (
@@ -181,7 +217,7 @@ def train(cache_dir, output, cfg, device, *, resume=False):
         _rank_zero(lambda: stack.enter_context(_lock_output(output)))
         _rank_zero(prepare_output)
         _seed(cfg["seed"])
-        model = build_model(cfg, device)
+        model = build_training_model(cfg, metadata, cache_dir, device)
         wrapped = DistributedDataParallel(
             model, device_ids=[device.index] if device.type == "cuda" else None,
             broadcast_buffers=False,
@@ -192,14 +228,15 @@ def train(cache_dir, output, cfg, device, *, resume=False):
         validation_model = model if ema is None else ema
         weight_kind = "raw" if ema is None else "ema"
         optimizer = torch.optim.AdamW(
-            model.parameters(), lr=cfg["learning_rate"], weight_decay=cfg["weight_decay"]
+            [parameter for parameter in model.parameters() if parameter.requires_grad],
+            lr=cfg["learning_rate"], weight_decay=cfg["weight_decay"]
         )
         scaler = torch.cuda.amp.GradScaler() if precision == "16-mixed" else None
         history, step, best_weights = [], 0, None
         _seed(cfg["seed"] + rank + 1)
         if resume and last_path.exists():
             last = load_tensor(last_path)
-            if last.get("format") != "navsim-dd-train-v1" or last["signature"] != signature:
+            if last.get("format") != train_format or last["signature"] != signature:
                 raise ValueError("Resume checkpoint does not match this NAVSIM experiment")
             history, step, best_weights = last["history"], last["step"], last["best_weights"]
             model.load_state_dict(last["raw"])
@@ -237,6 +274,10 @@ def train(cache_dir, output, cfg, device, *, resume=False):
                 "normalizer": metadata["normalizer"], "conditioner_identity": metadata["conditioner_identity"],
                 "weight_kind": weight_kind, "training_precision": precision,
             }
+            if reader:
+                from score_function.navsim_dd.reader_runtime import CHECKPOINT_FORMAT as READER_CHECKPOINT_FORMAT
+
+                common.update(format=READER_CHECKPOINT_FORMAT, reader_spec=model.reader_spec)
             atomic_write(output / "history.json", history)
             if repair_best or best_row["epoch"] == epoch:
                 best_export = {
@@ -336,7 +377,7 @@ def train(cache_dir, output, cfg, device, *, resume=False):
 
             def save():
                 atomic_write(last_path, {
-                    "format": "navsim-dd-train-v1", "signature": signature, "step": step,
+                    "format": train_format, "signature": signature, "step": step,
                     "raw": model.state_dict(), "ema": validation_model.state_dict(),
                     "optimizer": optimizer.state_dict(), "rng_by_rank": rank_rng,
                     "best_weights": best_weights, "history": history,

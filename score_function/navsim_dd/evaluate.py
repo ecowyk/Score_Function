@@ -64,6 +64,58 @@ def timed(fn, device):
     return result, 1000 * (perf_counter() - start)
 
 
+class ReaderConditioner:
+    """Expose the compact scene inputs expected by the frozen DD reader."""
+
+    def __init__(self, agent):
+        self.model = agent.eval().requires_grad_(False)._transfuser_model
+
+    @torch.no_grad()
+    def encode_features(self, features):
+        _, latent, _ = self.model._backbone(features['camera_feature'], features['lidar_feature'])
+        status = self.model._status_encoding(features['status_feature'])
+        if latent.shape[1:] != (512, 8, 8) or status.shape != (len(latent), 256):
+            raise ValueError(f'Invalid DD reader scene inputs: {latent.shape}, {status.shape}')
+        if not torch.isfinite(latent).all() or not torch.isfinite(status).all():
+            raise ValueError('Nonfinite DD reader scene inputs')
+        return latent, status
+
+
+def load_score_refiner(checkpoint, identity, device):
+    """Select the explicitly versioned model; never reinterpret a legacy checkpoint."""
+    from .runtime import NavsimRefiner
+    saved = torch.load(checkpoint, map_location='cpu', weights_only=True)
+    kind = saved.get('format')
+    del saved
+    if kind == 'navsim-dd-score-v1':
+        model = NavsimRefiner.from_checkpoint(checkpoint, device)
+        model.require_conditioner(identity)
+        return model, False
+    if kind == 'navsim-dd-reader-score-v1':
+        from .reader_runtime import DDReaderRefiner
+        model = DDReaderRefiner.from_checkpoint(checkpoint, device)
+        model.require_native_conditioner(identity)
+        return model, True
+    raise ValueError(f'Unsupported score checkpoint format: {kind!r}')
+
+
+@torch.no_grad()
+def verify_reader_refiner(agent, refiner, context, status, physical_xy):
+    """Check frozen weights and the trajectory reader without sampling DD trajectories."""
+    from .reader import export_reader_assets, verify_native_reader
+    assets = export_reader_assets(agent)
+    if refiner.model.reader_spec != assets['spec'] or refiner.model.reader.spec != assets['spec']:
+        raise ValueError('The score checkpoint reader geometry differs from the official DD configuration')
+    actual = refiner.model.reader.state_dict()
+    expected = assets['state_dict']
+    if actual.keys() != expected.keys() or any(
+        not torch.equal(actual[key].detach().cpu(), value.cpu()) for key, value in expected.items()
+    ):
+        raise ValueError('The score checkpoint frozen reader differs from the official DD weights')
+    checks = verify_native_reader(agent, context, status, physical_xy, assets=assets)
+    return {'frozen_reader_weights_match_native': True, 'reader_native_check': checks}
+
+
 @torch.no_grad()
 def native_top1(agent, features):
     """Observe the last decoder outputs without changing the native DD rollout."""
@@ -189,6 +241,8 @@ def load_reusable_k0(source, expected_run, selected, needed=None):
                         raise ValueError(f'Duplicate baseline token: {token}')
                     records[token] = dict(trajectory=trajectory, metrics=metrics,
                                           top1_index=row['top1_index'], seed=row['seed'])
+                    if 'log' in row:
+                        records[token]['log'] = row['log']
         if sorted(shard_tokens) != manifest['shard_tokens']:
             raise ValueError(f'Incomplete baseline records: {directory}')
         observed.extend(shard_tokens)
@@ -303,6 +357,7 @@ def parse_args(argv=None):
     parser.add_argument('--reuse-k0-from', type=Path,
                         help='reuse trajectories and K0 scores from a completed compatible paired evaluation')
     parser.add_argument('--merge', action='store_true', help='merge completed shards and check coverage')
+    parser.add_argument('--resume', action='store_true', help='resume a verified prefix of an incomplete shard')
     args = parser.parse_args(argv)
     if args.merge:
         return args
@@ -358,7 +413,6 @@ def run(args):
     from navsim.common.dataloader import MetricCacheLoader
     from .cache import conditioner_identity, verified_devkit_root
     from .conditioner import DDConditioner, load_diffusiondrive
-    from .runtime import NavsimRefiner
 
     class AllNodeMetricCache(MetricCacheLoader):
         # Upstream get_from_token handles its serialized payload; override only its
@@ -369,10 +423,10 @@ def run(args):
     agent = load_diffusiondrive(args.checkpoint, args.anchor, args.backbone, args.device)
     identity = conditioner_identity(args.checkpoint, args.anchor, args.backbone)
     refiner = None
+    uses_reader = False
     if not args.native_only:
-        refiner = NavsimRefiner.from_checkpoint(args.score_checkpoint, args.device)
-        refiner.require_conditioner(identity)
-    conditioner = DDConditioner(agent)
+        refiner, uses_reader = load_score_refiner(args.score_checkpoint, identity, args.device)
+    conditioner = ReaderConditioner(agent) if uses_reader else DDConditioner(agent)
     loader = build_loader(args, agent, config_root)
     selected, shard = select_tokens(loader.tokens, args.max_scenes, args.shard_index, args.num_shards)
     logs = {token: log for log, tokens in loader.get_tokens_list_per_log().items() for token in tokens}
@@ -387,6 +441,9 @@ def run(args):
                       data_root=str(args.data_root.resolve()), max_scenes=args.max_scenes,
                       score_checkpoint_sha256=file_hash(args.score_checkpoint) if refiner else None,
                       metric_cache=str(args.metric_cache.resolve()))
+    if uses_reader:
+        run_config['score_architecture'] = 'dd_scene_reader_score'
+        run_config['score_conditioner_identity'] = refiner.conditioner_identity
     baseline = None
     if args.reuse_k0_from is not None:
         if args.reuse_k0_from.resolve() == args.output.resolve():
@@ -408,19 +465,84 @@ def run(args):
         _run_shard(args, dest, shard, logs, agent, refiner, conditioner, cache, simulator, scorer, loader, manifest, baseline)
 
 
+def validate_result_row(row, token, log_name, steps, seed, baseline=None):
+    """Check one saved result, including exact paired K0 and per-arm deltas."""
+    arms = {str(k) for k in steps}
+    if (row.get('token') != token or row.get('log') != log_name
+            or row.get('seed') != token_seed(seed, token)
+            or set(row.get('metrics', {})) != arms
+            or set(row.get('trajectories', {})) != arms
+            or set(row.get('delta', {})) != arms):
+        raise ValueError(f'Invalid resumable shard row: {token}')
+    for k in arms:
+        poses, metrics = row['trajectories'][k], row['metrics'][k]
+        if (len(poses) != 8 or any(len(pose) != 3 for pose in poses)
+                or not all(math.isfinite(float(v)) for pose in poses for v in pose)
+                or 'score' not in metrics
+                or set(metrics) != set(row['metrics']['0'])
+                or not all(math.isfinite(float(v)) for v in metrics.values())
+                or row['delta'][k] != {m: v - row['metrics']['0'][m] for m, v in metrics.items()}):
+            raise ValueError(f'Invalid resumable trajectory or metrics: {token}, K={k}')
+    if not all(math.isfinite(float(row[name])) and row[name] >= 0
+               for name in ('native_ms', 'conditioner_ms', 'refine_ms')):
+        raise ValueError(f'Invalid resumable timing: {token}')
+    if baseline is not None:
+        saved = baseline[token]
+        if (row['trajectories']['0'] != saved['trajectory']
+                or row['metrics']['0'] != saved['metrics']
+                or row['top1_index'] != saved['top1_index']
+                or ('log' in saved and row['log'] != saved['log'])):
+            raise ValueError(f'Resumable K0 differs from source: {token}')
+    return {key: row[key] for key in ('token', 'metrics', 'delta', 'refine_ms')}
+
+
+def resume_shard_prefix(dest, shard, logs, steps, seed, baseline=None):
+    """Validate durable JSONL rows before appending; discard only an unfinished final line."""
+    temporary = dest / 'scenes.jsonl.tmp'
+    source = temporary if temporary.exists() else dest / 'scenes.jsonl'
+    if not source.exists():
+        return []
+    rows, end = [], 0
+    with source.open('rb') as stream:
+        while line := stream.readline():
+            if not line.endswith(b'\n'):
+                break
+            row = json.loads(line)
+            index = len(rows)
+            if index >= len(shard):
+                raise ValueError('Incomplete shard contains too many rows')
+            token = shard[index]
+            rows.append(validate_result_row(row, token, logs[token], steps, seed, baseline))
+            end = stream.tell()
+    # Validation finishes before any mutation. A complete newline-delimited row
+    # is never silently dropped, even if later rows are corrupt.
+    if source != temporary:
+        source.replace(temporary)
+    with temporary.open('r+b') as stream:
+        stream.truncate(end)
+    return rows
+
+
 def _run_shard(args, dest, shard, logs, agent, refiner, conditioner, cache, simulator, scorer, loader, manifest, baseline=None):
     from navsim.common.dataclasses import Trajectory
     from navsim.evaluate.pdm_score import pdm_score
     from .conditioner import features_from_input, verify_native_conditions
-    rows = []
-    with (dest / 'scenes.jsonl.tmp').open('w', encoding='utf-8') as out:
-        for i, token in enumerate(shard):
+    uses_reader = isinstance(conditioner, ReaderConditioner)
+    resume = getattr(args, 'resume', False)
+    rows = resume_shard_prefix(dest, shard, logs, args.ks, args.seed, baseline) if resume else []
+    start = len(rows)
+    if start:
+        print(f'Resuming shard after {start}/{len(shard)} validated scenes', flush=True)
+    with (dest / 'scenes.jsonl.tmp').open('a' if resume else 'w', encoding='utf-8') as out:
+        for i in range(start, len(shard)):
+            token = shard[i]
             try:
                 obs = loader.get_agent_input_from_token(token)
                 features = features_from_input(agent, obs, args.device)
                 seed = token_seed(args.seed, token)
                 checks, reference = {}, []
-                if args.verify_native and i == 0:
+                verify = args.verify_native and i == start
+                if verify and not uses_reader:
                     def observe_reference(_module, _inputs, result):
                         reference.append(result['trajectory'].detach().clone())
 
@@ -435,17 +557,21 @@ def _run_shard(args, dest, shard, logs, agent, refiner, conditioner, cache, simu
                         (raw, mode), native_ms = timed(lambda: native_top1(agent, features), args.device)
                 else:
                     cached = baseline[token]
+                    if 'log' in cached and cached['log'] != logs[token]:
+                        raise ValueError(f'K0 source log differs for token {token}')
                     raw = torch.tensor(cached['trajectory'], dtype=torch.float32, device=args.device)[None]
                     mode, native_ms = cached['top1_index'], 0.0
                     checks['k0_reused'] = True
-                if args.verify_native and i == 0:
+                if verify and not uses_reader:
                     if len(reference) != 1 or not torch.equal(reference[0], raw):
                         raise ValueError('K0 differs from the same-seed unmodified native forward')
                     checks['raw_k0_matches_native_forward'] = True
                 context, global_context, context_ms = None, None, 0.0
                 if refiner:
                     (context, global_context), context_ms = timed(lambda: conditioner.encode_features(features), args.device)
-                    if args.verify_native and i == 0:
+                    if verify and uses_reader:
+                        checks.update(verify_reader_refiner(agent, refiner, context, global_context, raw[..., :2]))
+                    if verify:
                         k0 = refiner.refine(raw, context, global_context, steps=0)
                         if not torch.equal(k0, raw):
                             raise ValueError('Score K0 altered native poses')
