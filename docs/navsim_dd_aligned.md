@@ -175,3 +175,26 @@ PDM 控制器和评分器，核对每个子项与原评测一致后，使用实�
 `dd_score_ddaligned_e500_visuals_latest.txt`。每例完成后更新状态和总览，
 单例失败仍继续其余案例，但整体状态会标记失败，不把缺失案例当成完成。
 将整个输出目录下载到本机后打开 `index.html`，可逐例播放并查看分项。
+
+固定 500 轮最终 RAW 权重、seed=20260922、σ=γ=0.1，仅比较 refinement 步数：
+
+```bash
+nohup /home/data/wyk/envs/diffusion_drive/bin/python -u \
+  scripts/eval_navsim_dd_k_sweep.py run --ks 5 10 50 100 \
+  >> /home/data/wyk/dataset/navsim/exp/dd_score_ddaligned_e500_k_sweep.log \
+  2>&1 < /dev/null &
+python3 scripts/eval_navsim_dd_k_sweep.py status
+```
+
+八卡处理全部 12,146 个 navtest 场景。每个场景从保存的同一 K0 出发，只编码
+一次条件，并沿一条 refine 路径推进到 K100，在 K5/10/50/100 读取快照和评分。
+沿用已完成 500 轮评测的 K0/K20，不重复计算这两臂的 PDM 分数。
+启动前验证来源完整、500 轮 checkpoint 摘要相同。最终合并还要求逐场景
+K0 轨迹、指标、token/log/seed/top1 完全一致，并核对两次评测的全部相关协议。
+
+结果存入独立的 `dd_score_ddaligned_e500_k_sweep_*` 目录，指针为
+`dd_score_ddaligned_e500_k_sweep_latest.txt`；原 500 轮 K20 评测与可视化指针
+保持不变。`summary.json` 是本次实际计算的各臂和复用 K0 的汇总；
+`comparison.json`、`comparison.csv` 再加入来源明确的旧 K20，形成
+K=0/5/10/20/50/100 的配对比较，保留子指标及改善/退化/持平数量。
+本轮是现有 navtest 的探索性诊断；后续调参结论应在独立验证集上确认。

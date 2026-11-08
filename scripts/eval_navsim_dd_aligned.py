@@ -81,7 +81,7 @@ def child_env(root):
     return env
 
 
-def preflight(root, epochs=100):
+def preflight(root, epochs=100, baseline_pointer="dd_score_e200_eval_latest.txt"):
     exp = root / "dataset/navsim/exp"
     training = training_directory(root, epochs)
     checkpoint = training / "final_raw.pt"
@@ -90,14 +90,14 @@ def preflight(root, epochs=100):
     history = read_json(training / "history.json")
     run = read_json(training / "run.json")
     validate_training(run, history, epochs)
-    pointer = exp / "dd_score_e200_eval_latest.txt"
+    pointer = exp / baseline_pointer
     if not pointer.is_file():
-        raise ValueError(f"Missing completed E200 evaluation pointer: {pointer}; K0 will not be recomputed")
+        raise ValueError(f"Missing completed evaluation pointer: {pointer}; K0 will not be recomputed")
     baseline = Path(pointer.read_text().strip())
     if not baseline.is_absolute() or read_json(baseline / "summary.json").get("count") != TOTAL:
-        raise ValueError("E200 baseline must be an absolute, completed 12146-scene evaluation")
+        raise ValueError("K0 source must be an absolute, completed 12146-scene evaluation")
     if len(list(baseline.glob("part-*-of-*/complete.json"))) != SHARDS:
-        raise ValueError("E200 baseline is missing its eight complete shard manifests")
+        raise ValueError("K0 source is missing its eight complete shard manifests")
     required = [root / "DiffusionDrive/checkpoints" / name for name in
                 ("diffusiondrive_navsim_88p1_PDMS", "kmeans_navsim_traj_20.npy", "pytorch_model.bin")]
     required += [root / "dataset/nuplan/maps/nuplan-maps-v1.0.json", exp / "metric_cache",
