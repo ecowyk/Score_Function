@@ -34,7 +34,7 @@
 | 现有 v1 metric cache | /home/data/wyk/dataset/navsim/exp/metric_cache |
 | 原生基线结果 | /home/data/wyk/dataset/navsim/exp/chainflow_native_navtest_v1 |
 | VLM 特征缓存 | /home/data/wyk/dataset/navsim/chainflow_vlm_cache |
-| 下载日志与记录 | /home/data/wyk/dataset/navsim/exp/chainflow_prepare |
+| 下载日志与记录 | /home/data/wyk/dataset/navsim/exp/chainflow_setup |
 | 交接记录 | /home/data/wyk/dataset/navsim/exp/chainflow_native_navtest_v1/reproduction_ready.json |
 
 不要把数据集放进代码目录或 src/，不要重新下载 nuplan-devkit，不要改现有 DD/nuPlan 环境。先检查官方内置 devkit 与现有 devkit 的兼容性；如需少量适配，明确记录，不能偷偷切换评分协议。
@@ -110,36 +110,49 @@
 7. 逐场景轨迹、metrics、token清单与元数据的内容哈希，供后续 Score 原样复用 K0；绝不能复用 DD 的 88.0337 K0。
 8. 持续进度查看命令、恢复命令、全部输出绝对路径。
 
-推荐交接 JSON（schema是双方约定，不能填未验证的值）：
+标准评测入口自动生成 `reproduction_ready.json`，schema为 `chainflow-native-ready-v1`。它记录baseline目录、count/valid_count、0–100的`pdms`、summary哈希、native/scoring identity、token digest与native seed。逐场景`metrics`及`summary.by_k`中的值保持0–1。不要手工创建ready标记或混淆这两个数值尺度。
 
-```json
-{
-  "schema": "chainflow-native-reproduction-v1",
-  "state": "complete",
-  "upstream_commit": "0f3565f66546139a0183bc5807d5f7234ae2d4b0",
-  "training_split": "navtrain",
-  "evaluation_split": "navtest",
-  "count": 12146,
-  "valid_count": 12146,
-  "score_scale": "0..1",
-  "mean_pdms": "<actual numeric result>",
-  "checkpoint": "<absolute path>",
-  "checkpoint_sha256": "<actual digest>",
-  "backbone": "<absolute path>",
-  "backbone_sha256": "<actual digest>",
-  "vlm_cache": "<absolute path>",
-  "vlm_provenance": "<absolute path>",
-  "resolved_config": "<absolute path>",
-  "resolved_config_sha256": "<actual digest>",
-  "native_noise_seed": 27,
-  "metric_cache": "<absolute path>",
-  "metrics": "<absolute per-token metrics file>",
-  "trajectories": "<absolute per-token raw trajectory directory/index>",
-  "token_index": "<absolute path with tokens/log names/file hashes>"
-}
+真正用于交接的是完整输出目录：每个`part-*-of-*`包含`run.json`、`scenes.jsonl`和`complete.json`，根目录包含`summary.json`。JSONL逐条记录token、log、原生种子、同一次forward的`trajectories["0"]`、`metrics["0"]`以及条件和metric cache内容哈希；JSON保存的float32数值可以无损恢复。根目录summary在全部分片验证后发布。
+
+Score队列检查逐场景记录、文件SHA和完整token集合，不只检查ready标记。若使用独立实现，也必须交付同等信息；完成格式导入与协议核对后再连接Score队列。不能仅凭一份汇总CSV推断原始轨迹和条件一致。
+
+## 本分支已经提供的启动工具
+
+在用户已有Score仓库之外建立独立工作树，例如：
+
+```bash
+cd /home/data/wyk/Score_Function_NAVSIM_DDAligned
+git fetch origin codex/chainflow-native-repro-1110
+git worktree add /home/data/wyk/Score_Function_ChainFlow_Repro origin/codex/chainflow-native-repro-1110
+cd /home/data/wyk/Score_Function_ChainFlow_Repro
+bash scripts/setup_navsim_chainflow.sh --scope native
 ```
 
-上述 angle-bracket 字符串只是示例占位符；真实交接文件应使用实际值，不能作为 ready 标记提交。
+目录已存在时先核对其commit和未提交修改，复用正确工作树，不盲目覆盖。公司CA确实阻止连接时可给setup增加单次`--insecure`；代理继续继承当前终端设置。
+
+`--scope native`只下载checkpoint、DINO与navtest VLM，精确压缩资产总量109,598,014,883 bytes。原生任务不必下载trainval VLM；后续Score准备的`--scope all`会跳过已校验完成的同一批资产。`release_manifest.json`记录完整固定release语义，不因下载范围改变，下载完成状态另写`assets.json`。
+
+先用新输出目录验收少量真实场景：
+
+```bash
+/home/data/wyk/envs/chainflow/bin/python -u scripts/eval_navsim_chainflow.py run   --mode baseline --workers 1 --max-scenes 8   --output /home/data/wyk/dataset/navsim/exp/chainflow_native_smoke_v1
+```
+
+通过后完整复现：
+
+```bash
+/home/data/wyk/envs/chainflow/bin/python -u scripts/eval_navsim_chainflow.py run   --mode baseline --workers 4
+```
+
+默认等待空闲GPU，CPU/GPU日志可在输出目录查看。同一命令恢复同一分片划分；`--workers`变化需用新目录。显式共享模式、GPU池和预算参见`--help`，不能仅因余下显存多就承诺没有算力竞争。
+
+持续监控：
+
+```bash
+/home/data/wyk/envs/chainflow/bin/python scripts/eval_navsim_chainflow.py status   --mode baseline --watch
+```
+
+本地CPU测试已覆盖下载、原生接口、配对记录和资源等待；未在公司节点执行真实模型/数据推理。接手agent仍需进行上述真实验收，并核对环境安装和峰值显存。
 
 ## 与 Score agent 的接口
 
@@ -152,4 +165,5 @@
 
 ## 快速给另一个 agent 的指令
 
-> 请按本任务书独立复现 ChainFlow-VLA 的 navtrain 85k 官方模型，完成环境和资产准备、数据覆盖检查、12,146场景原生K0评测及逐场景轨迹/指标交接。当前GPU已有任务，遵守资源约束，不操作其他进程。Score模块由另一个agent负责，不需要你训练或修改。先检查已有内容与资产下载成本，再推进可执行步骤；最终提交脚本与provenance，明确哪些已经服务器实测。
+> 请按本任务书独立复现 ChainFlow-VLA 的 navtrain 85k 官方模型，完成环境和资产准备、数据覆盖检查、12,146场景原生K0评测及逐场景轨迹/指标交接。当前GPU已有任务，遵守资源约束，不操作其他进程。Score模块由另一个agent负责，不需要你训练或修改。先读取当前分支的setup/eval工具，检查已有内容与资产下载成本，再推进可执行步骤；最终提交结果和provenance，明确哪些已经服务器实测。
+

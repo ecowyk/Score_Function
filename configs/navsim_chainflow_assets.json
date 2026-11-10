@@ -1,0 +1,252 @@
+{
+  "schema": "navsim_chainflow_assets_v1",
+  "upstream_repository": "AFARI-Research/ChainFlow-VLA",
+  "upstream_commit": "0f3565f66546139a0183bc5807d5f7234ae2d4b0",
+  "training_split": "navtrain_85k",
+  "expected_pdms": 93.82,
+  "assets": [
+    {
+      "role": "checkpoint",
+      "repo": "AFARI-Research/ChainFlow-VLA",
+      "repo_type": "model",
+      "revision": "d00244bd0e2b12575251f4f47370034831b0d6c1",
+      "path": "weights/stage_2/stage2_navtrain_9382.ckpt",
+      "size": 569057402,
+      "sha256": "420bb9254d852234fbe59b7c14c1406157cdf5fde7a1b19bd78175f287748db5"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "navtest/navtest.tar.zst",
+      "size": 108940712281,
+      "sha256": "5c045c8842685651f5ec95cca166d1785a36f14011cab1c279e609571d00877b"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0000.tar.zst",
+      "size": 38468116692,
+      "sha256": "eaf7bb9e51f07767854b0529909fff0c97015fdbe35aac8ff75da20017accc20"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0001.tar.zst",
+      "size": 29844629508,
+      "sha256": "5a43b9af82b0a1ec170e6f5506c05db6970d2291991a140d8382f2cb7e4d0197"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0002.tar.zst",
+      "size": 25449041711,
+      "sha256": "b2513e4b409da1c4eb2be04b20b1c5be483f6582f04b06127b2ad4c7a37df10d"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0003.tar.zst",
+      "size": 17011222205,
+      "sha256": "c3b8317af7c8dec9c3944c07f2961142273e8e2235008a62fcc5e0d77aec4e32"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0004.tar.zst",
+      "size": 26237712275,
+      "sha256": "e760a1d452ac9afadae64bf59a355fcbad7984ba8a2fa8913330258be11cb14d"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0005.tar.zst",
+      "size": 31394669944,
+      "sha256": "f129c0ca0affa4ed443ca12f257f449c711fc8864611c120b6fc39d05996bef4"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0006.tar.zst",
+      "size": 24782412765,
+      "sha256": "a936da4a5ba9f6f12538a9af4d2327b03ac4df9f1c1f4ad21ff8d1529e827619"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0007.tar.zst",
+      "size": 21663880978,
+      "sha256": "4a49f1186621b9297970a552458b5ada145f73b25ec1707283885a5434ed30f7"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0008.tar.zst",
+      "size": 30099936833,
+      "sha256": "93de8579532e038f80fdf96b4746544990bf38a3a0e3364b201a116ced43a571"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0009.tar.zst",
+      "size": 16068406857,
+      "sha256": "a52f9e162dcaf4c0e9262e54d5ac2de707a4580fae7105fc352d63b5026f6e22"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0010.tar.zst",
+      "size": 21081021476,
+      "sha256": "1f2e5ee2e15e4a66661097163366393e76b653986915e8529ee8ae9a45e155cd"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0011.tar.zst",
+      "size": 74650751955,
+      "sha256": "2253decf2d1163dd059b59b0dcedad94ab0aa732d7d31d536fea9e78342014f1"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0012.tar.zst",
+      "size": 65349929650,
+      "sha256": "77acb338d2e6c0527348b4fce2a4b92bed8efcac0ce4c0fdc5105009ded6a2b4"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0013.tar.zst",
+      "size": 114696434816,
+      "sha256": "7d761d181361e8f54d724abbe2ea6363cb3dec9260cd97ebd8e9ecbdd96beaee"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0014.tar.zst",
+      "size": 70937848510,
+      "sha256": "86b80f8810b151a22919469596484402196d01a50c78b799fe9d9bb62b111893"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0015.tar.zst",
+      "size": 41584248801,
+      "sha256": "4ca7ee813abe8dcc342c003ffb29b4434bbecc55b57fc43135cba4ad9850b7c7"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0016.tar.zst",
+      "size": 42290718856,
+      "sha256": "8c000aa8ddbf801b71f7a0202c495611b7d3fbadf3ab14760a2344dcb6904c1f"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0017.tar.zst",
+      "size": 23801430622,
+      "sha256": "59ab81de69fd04b494a5aff4840e9c02ace67a678506fd337a6e437e2d80e0ec"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0018.tar.zst",
+      "size": 28552243003,
+      "sha256": "cb9810ea136e0b29f227bf8d1740d7108de647a4a7847c1f13694f51545c72b6"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0019.tar.zst",
+      "size": 23299667557,
+      "sha256": "e57e016436f063bf4ea0f3f628eff6e087a0be36a4f0a114ba130e67484968c9"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0020.tar.zst",
+      "size": 27498557429,
+      "sha256": "55b5dc300929d1bba5697beef7c60a3cb8688f95daaf7766e3722f619516e3ff"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0021.tar.zst",
+      "size": 57025447086,
+      "sha256": "5af3fea8a256e54f7a264f8d171fd793a682919bb0b789a03b6f03c756f3fe62"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0022.tar.zst",
+      "size": 29219298139,
+      "sha256": "4228573ae12c6faa5443885051715a15e166d5ad64cfeaf2d3813ada75a2f798"
+    },
+    {
+      "role": "vlm_archive",
+      "repo": "AFARI-Research/ChainFlow-VLA-VLM-Feature-Cache",
+      "repo_type": "dataset",
+      "revision": "3716b6cf8a13546a3d47c97bf7e47672cdcc48fc",
+      "path": "trainval/trainval_0023.tar.zst",
+      "size": 45295298454,
+      "sha256": "0770fec12f871af0d4255d433157df1bb40be53715e654298f028e2fc3c6e99e"
+    },
+    {
+      "role": "backbone",
+      "repo": "timm/vit_small_patch14_reg4_dinov2.lvd142m",
+      "repo_type": "model",
+      "revision": "c04b5193082a8d5b0c4856c7937384a48136c5de",
+      "path": "model.safetensors",
+      "size": 88245200,
+      "sha256": "dca70548ecd7b03ffba6172c4db403014511b5ee6073f9fca72ba9e6e602a25d"
+    }
+  ]
+}
