@@ -166,4 +166,3 @@ bash scripts/setup_navsim_chainflow.sh --scope native
 ## 快速给另一个 agent 的指令
 
 > 请按本任务书独立复现 ChainFlow-VLA 的 navtrain 85k 官方模型，完成环境和资产准备、数据覆盖检查、12,146场景原生K0评测及逐场景轨迹/指标交接。当前GPU已有任务，遵守资源约束，不操作其他进程。Score模块由另一个agent负责，不需要你训练或修改。先读取当前分支的setup/eval工具，检查已有内容与资产下载成本，再推进可执行步骤；最终提交结果和provenance，明确哪些已经服务器实测。
-
