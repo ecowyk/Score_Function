@@ -59,7 +59,8 @@ def paths_for(root):
     return dict(python=root/'envs/chainflow/bin/python', devkit_root=root/'ChainFlow-VLA',
                 checkpoint=root/'ChainFlow-VLA/weights/stage_2/stage2_navtrain_9382.ckpt',
                 backbone=root/'ChainFlow-VLA/weights/vit_small_patch14_reg4_dinov2.lvd142m/model.safetensors',
-                vlm_cache=root/'dataset/navsim/chainflow_vlm_cache', data_root=root/'dataset/navsim',
+                vlm_cache=root/'dataset/navsim/chainflow_vlm_cache',
+                navtest_vlm_cache=root/'dataset/navsim/chainflow_vlm_cache', data_root=root/'dataset/navsim',
                 metric_cache=exp/'metric_cache', source_cache=exp/'dd_score_cache_v1',
                 baseline=exp/'chainflow_native_navtest_v1', cache=exp/'chainflow_score_cache_v1',
                 training=exp/'chainflow_score_v1', evaluation=exp/'chainflow_score_navtest_v1',
@@ -172,7 +173,8 @@ def training_complete(args):
 def cache_command(args, workers, check=False):
     cmd = [str(args.python), '-u', '-m', 'score_function.navsim_chainflow.cache']
     values = dict(source_cache=args.source_cache, cache_dir=args.cache, checkpoint=args.checkpoint,
-                  backbone=args.backbone, vlm_cache=args.vlm_cache, data_root=args.data_root, devkit_root=args.devkit_root)
+                  backbone=args.backbone, vlm_cache=args.vlm_cache, navtest_vlm_cache=args.navtest_vlm_cache,
+                  data_root=args.data_root, devkit_root=args.devkit_root)
     for key, value in values.items():
         cmd += ['--'+key.replace('_', '-'), str(value)]
     cmd += ['--workers', str(workers)]
@@ -200,7 +202,8 @@ def eval_command(args, workers, baseline=False):
            '--root', str(args.root), '--mode', 'baseline' if baseline else 'refine',
            '--gpu-lease-held', '--workers', str(workers), '--output', str(args.baseline if baseline else args.evaluation)]
     for key in ('devkit_root', 'checkpoint', 'backbone', 'vlm_cache', 'data_root', 'metric_cache'):
-        cmd += ['--'+key.replace('_', '-'), str(getattr(args, key))]
+        value = args.navtest_vlm_cache if key == 'vlm_cache' else getattr(args, key)
+        cmd += ['--'+key.replace('_', '-'), str(value)]
     if not baseline:
         cmd += ['--baseline', str(args.baseline), '--score-checkpoint', str(args.training/'final_ema.pt'),
                 '--ks', *map(str, KS), '--gamma', '.1', '--expected-epoch', '500', '--weight-kind', 'ema']
@@ -213,6 +216,9 @@ def helper_command(args, mode):
            '--loader-workers', str(args.loader_workers)]
     for key in paths_for(args.root):
         cmd += ['--'+key.replace('_', '-'), str(getattr(args, key))]
+    cmd += ['--download-attempts', str(args.download_attempts), '--download-endpoint', args.download_endpoint]
+    if args.insecure_downloads:
+        cmd.append('--insecure-downloads')
     return cmd
 
 
@@ -288,8 +294,8 @@ class Queue:
 
     def wait_baseline(self):
         self.update(stage='wait_native', status='waiting_native', log=None)
-        while not (self.args.baseline/'summary.json').is_file():
-            self.note(f'Waiting for independent native reproduction: {self.args.baseline}/summary.json')
+        while not any((self.args.baseline/name).is_file() for name in ('summary.json', 'reproduction_ready.json')):
+            self.note(f'Waiting for independent native reproduction: {self.args.baseline}')
             self.update(status='waiting_native')
             time.sleep(self.args.poll)
         self.execute('verify_native', helper_command(self.args, '_verify-native'))
@@ -298,8 +304,10 @@ class Queue:
         args = self.args
         if not args.python.is_file():
             raise FileNotFoundError(f'Create the ChainFlow conda environment first: {args.python}')
-        self.execute('check_data', cache_command(args, 1, check=True))
         self.wait_baseline()
+        if args.prepare_assets:
+            self.execute('prepare_assets', helper_command(args, '_prepare-assets'))
+        self.execute('check_data', cache_command(args, 1, check=True))
         if (args.cache/'TRAINING_READY.json').is_file():
             self.execute('verify_cache', helper_command(args, '_verify-cache'))
         else:
@@ -325,13 +333,99 @@ class Queue:
 def verify_native(args):
     from score_function.navsim_chainflow.native import conditioner_identity
     from score_function.navsim_chainflow.evaluate import scoring_identity, validate_native_baseline
+    from score_function.navsim_chainflow.assets import load_plan, publish_release_manifest
+    args.vlm_cache.mkdir(parents=True, exist_ok=True)
+    publish_release_manifest(args.vlm_cache/'release_manifest.json', load_plan())
     identity = conditioner_identity(args.devkit_root, args.checkpoint, args.backbone, args.vlm_cache)
+    if conditioner_identity(args.devkit_root, args.checkpoint, args.backbone, args.navtest_vlm_cache) != identity:
+        raise ValueError('Train/val and navtest VLM roots declare different frozen conditioners')
     result = validate_native_baseline(args.baseline, expected_identity=identity,
                                      expected_scoring=scoring_identity(args.devkit_root), expected_count=12146)
+    if result.get('protocol', {}).get('external_handoff'):
+        from score_function.navsim_chainflow.evaluate import audit_external_baseline
+        audit = audit_external_baseline(args.baseline, args.devkit_root, args.metric_cache,
+                                        expected_identity=identity, max_scenes=8)
+        atomic_json(args.output/'native_metric_preflight.json', audit)
+        if not audit.get('passed'):
+            raise ValueError('External native metric replay preflight did not pass')
+    source = args.baseline/'reproduction_ready.json' if (args.baseline/'reproduction_ready.json').is_file() else args.baseline/'summary.json'
     atomic_json(args.output/'native_verified.json', dict(verified=now(), baseline=str(args.baseline),
-                summary_sha256=sha256(args.baseline/'summary.json'), count=result['count'],
+                source=str(source), source_sha256=sha256(source), count=result['count'],
                 native_pdms=100*result['by_k']['0']['mean']['score']))
     print(f"Verified native baseline: {result['count']} scenes, PDMS={100*result['by_k']['0']['mean']['score']:.4f}", flush=True)
+
+
+def trainval_vlm_coverage(tasks, root):
+    """Count requested train/val files without interpreting their contents as verified."""
+    root = Path(root)
+    counts = {"train": 0, "val": 0}
+    present = {"train": 0, "val": 0}
+    missing = []
+    for task in tasks:
+        split = task["split"]
+        if split not in counts:
+            raise ValueError(f"Unexpected source split: {split}")
+        for record in task["records"]:
+            counts[split] += 1
+            path = root/record["log_name"]/record["token"]/"internvl_feature.gz"
+            if path.is_file() and path.stat().st_size > 0:
+                present[split] += 1
+            elif len(missing) < 20:
+                missing.append(str(path))
+    if counts != {"train": 85109, "val": 18179}:
+        raise ValueError(f"Source cache does not have the expected train/val membership: {counts}")
+    return {"expected": counts, "present": present, "complete": present == counts,
+            "missing_count": sum(counts.values())-sum(present.values()), "missing_examples": missing,
+            "audit": "file_presence_and_nonzero_size; tensor content checked during frozen feature caching"}
+
+
+def prepare_assets(args):
+    """CPU preparation only: preserve the existing environment, native weights and navtest."""
+    from score_function.navsim_chainflow.assets import (load_plan, publish_release_manifest, asset_paths,
+                                                        selected_assets, fetch)
+    from score_function.navsim_chainflow.cache import source_tasks
+    from score_function.navsim_chainflow.native import conditioner_identity
+    # This private helper is launched as its own process; no priority changes to other jobs.
+    try:
+        os.setpriority(os.PRIO_PROCESS, 0, 19)
+    except (AttributeError, OSError):
+        pass
+    plan = load_plan()
+    args.vlm_cache.mkdir(parents=True, exist_ok=True)
+    publish_release_manifest(args.vlm_cache/'release_manifest.json', plan)
+    # Refuse wrong/modified native code before a potentially multi-day download.
+    conditioner_identity(args.devkit_root, args.checkpoint, args.backbone, args.vlm_cache)
+    _, tasks = source_tasks(args.source_cache)
+    before = trainval_vlm_coverage(tasks, args.vlm_cache)
+    report = {"schema": "chainflow-score-asset-preparation-v1", "started": now(),
+              "vlm_cache": str(args.vlm_cache), "navtest_vlm_cache": str(args.navtest_vlm_cache),
+              "source_manifest_sha256": sha256(args.source_cache/'manifest.json'), "before": before,
+              "environment_reused": str(args.python), "download_scope": "trainval_only"}
+    atomic_json(args.output/'asset_preparation.json', report)
+    print(f"Train VLM: {before['present']['train']}/85109; val VLM: {before['present']['val']}/18179", flush=True)
+    if before['complete']:
+        print('Existing train/val VLM coverage is complete; no archives downloaded.', flush=True)
+    else:
+        if args.vlm_cache != asset_paths(args.root)['vlm_cache']:
+            raise ValueError('Automatic trainval downloads require the default --vlm-cache path; '
+                             'populate the custom path first or use the default path')
+        try:
+            import zstandard  # Required before spending time downloading a large archive.
+        except ImportError as exc:
+            raise RuntimeError(f'Missing zstandard in the existing ChainFlow environment. '
+                               f'Install it using {args.python} -m pip install zstandard, then resume.') from exc
+        selected = selected_assets(plan, only='trainval', scope='all')
+        total = sum(asset['size'] for asset in selected)
+        print(f"Preparing {len(selected)} trainval VLM archives ({total:,} compressed bytes from empty). "
+              'Verified extracted shards are reused. Native weights and navtest are not downloaded.', flush=True)
+        fetch(plan, args.root, only='trainval', scope='all', endpoint=args.download_endpoint,
+              insecure=args.insecure_downloads, attempts=args.download_attempts)
+    after = trainval_vlm_coverage(tasks, args.vlm_cache)
+    report.update(after=after, finished=now(), complete=after['complete'])
+    atomic_json(args.output/'asset_preparation.json', report)
+    if not after['complete']:
+        raise ValueError(f"Trainval VLM preparation still lacks {after['missing_count']} required files")
+    print('Train/val VLM files ready; the next stage audits all raw cameras and VLM coverage.', flush=True)
 
 
 def verify_cache(args, full=True):
@@ -362,22 +456,22 @@ def verify_cache(args, full=True):
 
 
 def verify_evaluation(args):
-    from score_function.navsim_chainflow.evaluate import collect_completed, _verified_summary, scoring_identity, validate_row
+    from score_function.navsim_chainflow.evaluate import (collect_completed, collect_baseline, baseline_reference,
+                                                            _verified_summary, scoring_identity, validate_row)
     from score_function.navsim_chainflow.native import conditioner_identity
     protocol, rows, _ = collect_completed(args.evaluation)
     summary = _verified_summary(args.evaluation, protocol, rows)
     request = read_json(args.evaluation/'launcher.json')['request']
-    _, baseline_rows, hashes = collect_completed(args.baseline)
+    baseline_protocol, baseline_rows, hashes = collect_baseline(args.baseline)
     baseline = {row['token']: row for row in baseline_rows}
     if (protocol['mode'] != 'refine' or len(rows) != 12146 or protocol['ks'] != [0, *KS]
             or request['score_checkpoint_sha256'] != sha256(args.training/'final_ema.pt')
             or request['baseline'] != str(args.baseline)
-            or protocol['baseline']['files_sha256'] != hashes
-            or protocol['baseline']['summary_sha256'] != sha256(args.baseline/'summary.json')
+            or protocol['baseline'] != baseline_reference(args.baseline, baseline_protocol, hashes)
             or protocol['score_checkpoint_sha256'] != sha256(args.training/'final_ema.pt')
             or protocol['score_epoch'] != 500 or protocol['score_weight_kind'] != 'ema'
             or protocol['gamma'] != .1 or protocol['scoring_identity'] != scoring_identity(args.devkit_root)
-            or request['native_identity'] != conditioner_identity(args.devkit_root, args.checkpoint, args.backbone, args.vlm_cache)):
+            or request['native_identity'] != conditioner_identity(args.devkit_root, args.checkpoint, args.backbone, args.navtest_vlm_cache)):
         raise ValueError('Completed paired evaluation differs from this pipeline')
     for row in rows:
         validate_row(row, row['token'], row['log'], [0, *KS], baseline=baseline[row['token']])
@@ -441,7 +535,7 @@ def snapshot(args):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['run', 'status', '_verify-native', '_verify-cache', '_verify-evaluation', '_preflight'])
+    parser.add_argument('command', choices=['run', 'status', '_verify-native', '_verify-cache', '_verify-evaluation', '_preflight', '_prepare-assets'])
     parser.add_argument('--root', type=Path, default=Path('/home/data/wyk'))
     for key in paths_for(Path('/home/data/wyk')):
         parser.add_argument('--'+key.replace('_', '-'), type=Path)
@@ -455,16 +549,32 @@ def parse_args(argv=None):
     parser.add_argument('--gpu-reserve-gb', type=float, default=4)
     parser.add_argument('--poll', type=float, default=15)
     parser.add_argument('--watch', action='store_true')
+    parser.add_argument('--prepare-assets', action='store_true',
+                        help='After native validation, fetch only missing trainval VLM releases; reuse environment and native assets')
+    parser.add_argument('--download-attempts', type=int, default=12)
+    parser.add_argument('--download-endpoint', default=os.environ.get('HF_ENDPOINT', 'https://huggingface.co'))
+    parser.add_argument('--insecure-downloads', action='store_true',
+                        help='Disable TLS verification only in the trainval download subprocess')
     args = parser.parse_args(argv)
     args.root = args.root.expanduser().resolve()
+    explicit_test_vlm = args.navtest_vlm_cache is not None
     for key, value in paths_for(args.root).items():
         chosen = (getattr(args, key) or value).expanduser()
         # Resolving a venv's python symlink would silently select the base interpreter.
         setattr(args, key, Path(os.path.abspath(chosen)) if key == 'python' else chosen.resolve())
+    if not explicit_test_vlm:
+        args.navtest_vlm_cache = args.vlm_cache
+        handoff = args.baseline/'reproduction_ready.json'
+        if handoff.is_file():
+            meta = read_json(handoff)
+            if meta.get('schema') == 'chainflow-native-reproduction-v1' and meta.get('vlm_cache'):
+                args.navtest_vlm_cache = Path(meta['vlm_cache']).expanduser().resolve()
     args.config = args.config.expanduser().resolve()
     args.workers = int(args.workers) if args.workers != 'auto' else args.workers
     if not 0 < args.poll <= 60 or args.microbatch_size < 1 or args.loader_workers < 0:
         parser.error('Require poll in (0,60], positive microbatch and nonnegative loader workers')
+    if args.download_attempts < 1:
+        parser.error('Require positive download attempts')
     if args.gpu_budget_gb <= 0 or args.gpu_reserve_gb < 0:
         parser.error('Require positive GPU memory budget and nonnegative reserve')
     return args
@@ -489,6 +599,8 @@ def main(argv=None):
         return verify_evaluation(args)
     if args.command == '_preflight':
         return preflight(args)
+    if args.command == '_prepare-assets':
+        return prepare_assets(args)
     with pipeline_lock(args.output):
         bind_plan(args.output/'plan.json', plan_for(args))
         queue = Queue(args)

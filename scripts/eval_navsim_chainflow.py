@@ -121,7 +121,7 @@ def worker_command(args, index):
 def request_identity(args):
     # Bind cached completion to launch arguments without loading any model/GPU.
     from score_function.navsim_chainflow.native import conditioner_identity
-    from score_function.navsim_chainflow.evaluate import scoring_identity
+    from score_function.navsim_chainflow.evaluate import scoring_identity, validate_native_baseline, baseline_reference
     paths = ("devkit_root", "checkpoint", "backbone", "vlm_cache", "data_root", "metric_cache")
     request = {name: str(getattr(args, name).resolve()) for name in paths}
     request.update(mode=args.mode, workers=args.workers, seed=args.seed, gamma=args.gamma,
@@ -131,7 +131,10 @@ def request_identity(args):
     request["native_identity"] = conditioner_identity(args.devkit_root, args.checkpoint, args.backbone, args.vlm_cache)
     request["scoring_identity"] = scoring_identity(args.devkit_root)
     if args.mode == "refine":
+        validate_native_baseline(args.baseline, expected_identity=request["native_identity"],
+                                 expected_scoring=request["scoring_identity"], expected_count=args.max_scenes or TOTAL)
         request.update(baseline=str(args.baseline.resolve()),
+                       baseline_reference=baseline_reference(args.baseline),
                        score_checkpoint=str(args.score_checkpoint.resolve()),
                        score_checkpoint_sha256=file_hash(args.score_checkpoint),
                        expected_epoch=args.expected_epoch, weight_kind=args.weight_kind)
@@ -148,6 +151,8 @@ def require_launch_protocol(protocol, request):
     if request["mode"] == "refine":
         expected.update(score_checkpoint_sha256=request["score_checkpoint_sha256"],
                         score_epoch=request["expected_epoch"], score_weight_kind=request["weight_kind"])
+        if "baseline_reference" in request:
+            expected["baseline"] = request["baseline_reference"]
     for key, value in expected.items():
         if protocol.get(key) != value:
             raise ValueError(f"Completed shard differs from current launch: {key}")
@@ -251,7 +256,8 @@ def run(args):
             if args.output.resolve() == args.baseline.resolve():
                 raise ValueError("Refinement must not overwrite the native baseline")
             validate_score_checkpoint(args)
-            if not (args.baseline / "summary.json").is_file():
+            from score_function.navsim_chainflow.handoff import is_handoff
+            if not is_handoff(args.baseline) and not (args.baseline / "summary.json").is_file():
                 raise FileNotFoundError("The native baseline must be complete before Score evaluation")
         request = request_identity(args)
         state_path = args.output / "launcher.json"

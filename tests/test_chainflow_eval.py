@@ -176,6 +176,80 @@ class ChainFlowEvaluationTests(unittest.TestCase):
         self.assertFalse((self.root / "refine/summary.json").exists())
         self.assertEqual(self.native_calls, 4)
 
+    def external_fixture(self):
+        """Real adapter is independently tested; exercise its evaluator contract."""
+        self.baseline()
+        protocol, native_rows, _ = ev.collect_completed(self.root / "baseline")
+        identity = dict(chainflow_commit="pinned", checkpoint_sha256="a"*64, backbone_sha256="b"*64)
+        rows = {}
+        for row in native_rows:
+            source = copy.deepcopy(row)
+            for key in ("condition_sha256", "metric_cache_sha256", "native_ms", "conditioner_ms", "refine_ms"):
+                source.pop(key)
+            source.update(native_origin="external-handoff", trajectory_dtype="float64", trajectory_sha256="c"*64)
+            source["trajectories"]["0"][0][0] += 0.123456789012345
+            source["metrics"]["0"]["score"] = .8 + source["trajectories"]["0"][0][0] * .01
+            rows[source["token"]] = source
+        imported = dict(schema="chainflow-external-baseline-v1", rows=rows,
+                        identity=identity, manifest={"metric_cache": str(self.metric)},
+                        summary={"count": 4, "valid_count": 4, "failed_count": 0},
+                        provenance={"source": "external/reproduction_ready.json", "files_sha256": {"index": "d"*64}})
+        self.modules["score_function.navsim_chainflow.native"].load_agent = lambda *a: SimpleNamespace(_score_bridge_identity=identity)
+        return imported
+
+    def test_external_float64_k0_is_replayed_then_reused_without_native_forward(self):
+        imported = self.external_fixture()
+        from score_function.navsim_chainflow import handoff
+        with patch.dict("sys.modules", self.modules), patch.object(handoff, "is_handoff", return_value=True), \
+                patch.object(handoff, "load_handoff", return_value=imported), \
+                patch.object(FakeRefiner, "require_conditioner"):
+            ev.run(self.args("refine", shards=1))
+        self.assertEqual(self.native_calls, 4)
+        _, rows, _ = ev.collect_completed(self.root / "refine")
+        for row in rows:
+            source = imported["rows"][row["token"]]
+            self.assertEqual(row["trajectories"]["0"], source["trajectories"]["0"])
+            self.assertEqual(row["metrics"]["0"], source["metrics"]["0"])
+            self.assertEqual(row["k0_metric_audit"]["max_abs_error"], 0.)
+            self.assertFalse(row["native_forward_executed"])
+            ev.validate_row(row, row["token"], "log", [0, 5, 10, 20], baseline=source)
+        # A missing/different original condition hash is never invented.
+        self.assertNotIn("condition_sha256", imported["rows"]["a"])
+
+    def test_external_incompatible_metrics_fail_before_any_refinement(self):
+        imported = self.external_fixture()
+        imported["rows"]["a"]["metrics"]["0"]["time_to_collision_within_bound"] = .5
+        from score_function.navsim_chainflow import handoff
+        with patch.dict("sys.modules", self.modules), patch.object(handoff, "is_handoff", return_value=True), \
+                patch.object(handoff, "load_handoff", return_value=imported), \
+                patch.object(FakeRefiner, "require_conditioner"), patch.object(FakeRefiner, "refine_many") as refine:
+            with self.assertRaisesRegex(RuntimeError, "Evaluation failed") as error:
+                ev.run(self.args("refine", shards=1))
+            self.assertIn("metric replay differs", str(error.exception.__cause__))
+            refine.assert_not_called()
+        self.assertEqual(self.native_calls, 4)
+
+    def test_external_cpu_preflight_checks_saved_trajectories_without_encoder(self):
+        imported = self.external_fixture()
+        from score_function.navsim_chainflow import handoff
+        with patch.dict("sys.modules", self.modules), patch.object(handoff, "is_handoff", return_value=True), \
+                patch.object(handoff, "load_handoff", return_value=imported):
+            report = ev.audit_external_baseline(self.root / "baseline", self.devkit, self.metric,
+                                                imported["identity"], max_scenes=3)
+        self.assertEqual(report["sample_count"], 3)
+        self.assertEqual(report["total_count"], 4)
+        self.assertTrue(report["passed"])
+        self.assertTrue(report["full_replay_required_during_evaluation"])
+        self.assertEqual(self.native_calls, 4)
+
+    def test_metric_audit_requires_all_finite_matching_components(self):
+        original = vars(FakeMetrics())
+        self.assertEqual(ev.verify_k0_metrics(original, original), 0.)
+        for altered in ({**original, "comfort": float("nan")},
+                        {**original, "ego_progress": .50001}, {"score": .9}):
+            with self.assertRaises(ValueError):
+                ev.verify_k0_metrics(altered, original)
+
     def test_external_native_handoff_validates_assets_coverage_and_summary(self):
         self.baseline()
         report = ev.validate_native_baseline(

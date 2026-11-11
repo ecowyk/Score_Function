@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -56,6 +57,62 @@ class PipelineTests(unittest.TestCase):
         i = evaluate.index('--ks')
         self.assertEqual(evaluate[i+1:i+6], ['5','10','15','20','30'])
         self.assertEqual(evaluate[evaluate.index('--mode')+1], 'refine')
+
+    def test_external_handoff_selects_existing_test_vlm_without_moving_it(self):
+        baseline = self.root/'external-native'
+        wrapper = self.root/'already-downloaded-test-wrapper'
+        self.write(baseline/'reproduction_ready.json',
+                   {'schema': 'chainflow-native-reproduction-v1', 'vlm_cache': str(wrapper)})
+        args = queue.parse_args(['run', '--root', str(self.root), '--baseline', str(baseline)])
+        self.assertEqual(args.navtest_vlm_cache, wrapper)
+        self.assertNotEqual(args.vlm_cache, wrapper)
+        command = queue.cache_command(args, 1, check=True)
+        self.assertEqual(command[command.index('--vlm-cache')+1], str(args.vlm_cache))
+        self.assertEqual(command[command.index('--navtest-vlm-cache')+1], str(wrapper))
+        command = queue.eval_command(args, 4)
+        self.assertEqual(command[command.index('--vlm-cache')+1], str(wrapper))
+        self.assertFalse(wrapper.exists())
+
+    def test_external_ready_marker_does_not_require_summary_json(self):
+        self.write(self.args.baseline/'reproduction_ready.json', {'schema': 'chainflow-native-reproduction-v1'})
+        runner = queue.Queue(self.args)
+        with mock.patch.object(queue.time, 'sleep') as sleep, mock.patch.object(runner, 'execute') as execute:
+            runner.wait_baseline()
+        sleep.assert_not_called()
+        self.assertEqual(execute.call_args.args[0], 'verify_native')
+
+    def test_preparation_reuses_complete_training_features_and_never_reinstalls(self):
+        from score_function.navsim_chainflow import assets
+        complete = {'present': {'train': 85109, 'val': 18179}, 'complete': True, 'missing_count': 0}
+        cache_module = types.ModuleType('score_function.navsim_chainflow.cache')
+        cache_module.source_tasks = mock.Mock(return_value=({}, []))
+        native_module = types.ModuleType('score_function.navsim_chainflow.native')
+        native_module.conditioner_identity = mock.Mock(return_value={})
+        self.write(self.args.source_cache/'manifest.json', {})
+        with mock.patch.dict(sys.modules, {cache_module.__name__: cache_module, native_module.__name__: native_module}), \
+                mock.patch.object(queue, 'trainval_vlm_coverage', return_value=complete), \
+                mock.patch.object(assets, 'fetch') as fetch, mock.patch.object(queue.os, 'setpriority'):
+            queue.prepare_assets(self.args)
+        fetch.assert_not_called()
+        native_module.conditioner_identity.assert_called_once()
+        self.assertTrue(queue.read_json(self.args.output/'asset_preparation.json')['complete'])
+
+    def test_preparation_fetches_only_trainval_and_checks_coverage_afterwards(self):
+        from score_function.navsim_chainflow import assets
+        missing = {'present': {'train': 0, 'val': 0}, 'complete': False, 'missing_count': 103288}
+        complete = {'present': {'train': 85109, 'val': 18179}, 'complete': True, 'missing_count': 0}
+        cache_module = types.ModuleType('score_function.navsim_chainflow.cache')
+        cache_module.source_tasks = mock.Mock(return_value=({}, []))
+        native_module = types.ModuleType('score_function.navsim_chainflow.native')
+        native_module.conditioner_identity = mock.Mock(return_value={})
+        self.write(self.args.source_cache/'manifest.json', {})
+        with mock.patch.dict(sys.modules, {cache_module.__name__: cache_module, native_module.__name__: native_module}), \
+                mock.patch.object(queue, 'trainval_vlm_coverage', side_effect=[missing, complete]), \
+                mock.patch.object(assets, 'fetch') as fetch, mock.patch.object(queue.os, 'setpriority'):
+            queue.prepare_assets(self.args)
+        self.assertEqual(fetch.call_args.kwargs['only'], 'trainval')
+        self.assertEqual(fetch.call_args.kwargs['scope'], 'all')
+        self.assertEqual(fetch.call_args.args[1], self.args.root)
 
     def test_plan_refuses_configuration_or_code_rebinding(self):
         path = self.args.output/'plan.json'
@@ -120,8 +177,19 @@ class PipelineTests(unittest.TestCase):
                 mock.patch.object(runner, 'wait_baseline', side_effect=lambda: stages.append('wait_native')), \
                 mock.patch.object(queue, 'training_complete', side_effect=[False, True]):
             runner.run()
-        self.assertEqual(stages, ['check_data', 'wait_native', 'cache', 'preflight', 'train', 'evaluate'])
+        self.assertEqual(stages, ['wait_native', 'check_data', 'cache', 'preflight', 'train', 'evaluate'])
         self.assertEqual(runner.state['status'], 'complete')
+
+    def test_optional_download_stage_runs_after_native_check_before_data_audit(self):
+        self.args.prepare_assets = True
+        runner = queue.Queue(self.args)
+        stages = []
+        with mock.patch.object(runner, 'execute', side_effect=lambda stage, *a: stages.append(stage)), \
+                mock.patch.object(runner, 'gpu', side_effect=lambda stage, *a, **k: stages.append(stage)), \
+                mock.patch.object(runner, 'wait_baseline', side_effect=lambda: stages.append('wait_native')), \
+                mock.patch.object(queue, 'training_complete', side_effect=[False, True]):
+            runner.run()
+        self.assertEqual(stages[:3], ['wait_native', 'prepare_assets', 'check_data'])
 
     def test_completed_evaluation_is_verified_without_waiting_for_gpu(self):
         runner = queue.Queue(self.args)

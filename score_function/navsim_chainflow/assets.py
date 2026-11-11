@@ -139,7 +139,11 @@ def quarantine(path):
 def _response_offset(response, offset, expected_size):
     status = getattr(response, "status", None) or response.getcode()
     if status == 200:
-        effective_offset = 0  # A server ignoring Range must REPLACE, never append.
+        if offset:
+            # Never discard an existing prefix just because a proxy/origin
+            # ignores Range. Reject before opening the file or reading the body.
+            raise ValueError("Server ignored Range (HTTP 200); existing partial preserved")
+        effective_offset = 0
     elif status == 206:
         value = response.headers.get("Content-Range", "")
         match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", value)
@@ -198,8 +202,6 @@ def download(asset, destination, *, endpoint="https://huggingface.co", insecure=
                 request = urllib.request.Request(asset_url(asset, endpoint), headers=headers)
                 with opener(request) as response:
                     actual_offset = _response_offset(response, offset, asset["size"])
-                    if actual_offset != offset:
-                        print("Server ignored Range; replacing the partial download from byte zero.", flush=True)
                     offset = actual_offset
                     last_report, started, start_offset = time.monotonic(), time.monotonic(), offset
                     with partial.open("ab" if offset else "wb") as stream:
@@ -365,6 +367,8 @@ def publish_release_manifest(path, plan):
 
     Do not add status, local paths, timestamps, extraction state or endpoint here.
     The separate assets.json inventory records mutable completion information.
+    Publishing this declaration never means its archives/features are present:
+    per-archive extraction markers and the split coverage audit establish that.
     """
     release = {"schema": "chainflow_release_manifest_v1",
                "upstream_repository": plan["upstream_repository"],

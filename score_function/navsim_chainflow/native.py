@@ -22,6 +22,7 @@ FILTER_ROOT = "navsim/planning/script/config/common/train_test_split"
 CONDITION = "chainflow-dino64-ego256-internvl1536-v1"
 CAMERAS = ("cam_f0", "cam_b0", "cam_l0", "cam_r0")
 OFFICIAL_85K_SHA256 = "420bb9254d852234fbe59b7c14c1406157cdf5fde7a1b19bd78175f287748db5"
+NAVTEST_VLM_WRAPPER = "navtest_recogdrive_vlm2B_traj_cache_first_forward"
 
 
 def activate_devkit(devkit_root):
@@ -57,6 +58,26 @@ def validate_release_manifest(path, checkpoint_sha256, backbone_sha256):
     return file_hash(path)
 
 
+def release_manifest_path(vlm_cache):
+    """Locate the release declaration without moving an existing native cache.
+
+    The official navtest archive has one named wrapper. Independent reproduction
+    may retain it, while our train/val extractor writes logs directly below the
+    parent. Both layouts use the same immutable release declaration. This file
+    declares expected assets; its presence does not establish feature coverage.
+    """
+    root = Path(vlm_cache).expanduser().resolve()
+    direct = root / "release_manifest.json"
+    parent = root.parent / "release_manifest.json"
+    if root.name == NAVTEST_VLM_WRAPPER and parent.is_file():
+        if direct.exists() and (not direct.is_file() or read_json(direct) != read_json(parent)):
+            raise ValueError("Conflicting release declarations for the native navtest VLM cache")
+        return parent
+    if direct.is_file():
+        return direct
+    raise FileNotFoundError(direct)
+
+
 def conditioner_identity(devkit_root, checkpoint, backbone, vlm_cache):
     root = activate_devkit(devkit_root)
     checkpoint, backbone, vlm_cache = (Path(p).expanduser().resolve() for p in (checkpoint, backbone, vlm_cache))
@@ -71,7 +92,7 @@ def conditioner_identity(devkit_root, checkpoint, backbone, vlm_cache):
                     "navsim/agents/chainflow_vla/builders/feature_builder.py",
                     "navsim/planning/training/dataset.py"]
     checkpoint_sha256, backbone_sha256 = file_hash(checkpoint), file_hash(backbone)
-    release_sha256 = validate_release_manifest(vlm_cache / "release_manifest.json", checkpoint_sha256, backbone_sha256)
+    release_sha256 = validate_release_manifest(release_manifest_path(vlm_cache), checkpoint_sha256, backbone_sha256)
     return {
         "condition": CONDITION, "chainflow_commit": CHAINFLOW_COMMIT,
         "checkpoint_sha256": checkpoint_sha256, "backbone_sha256": backbone_sha256,

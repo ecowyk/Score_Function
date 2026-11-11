@@ -28,6 +28,7 @@ KS = (5, 10, 15, 20, 30)
 NATIVE_SEED = 27
 METRICS = {"no_at_fault_collisions", "drivable_area_compliance", "ego_progress",
            "time_to_collision_within_bound", "comfort", "driving_direction_compliance", "score"}
+K0_AUDIT_TOLERANCE = 1e-9
 COMPATIBLE = ("schema", "split", "seed", "native_seed", "identity", "scoring_identity",
               "execution_identity", "token_digest", "count", "data_root", "metric_cache", "max_scenes")
 
@@ -134,14 +135,43 @@ def validate_row(row, token, log_name, steps, baseline=None):
     for key in ("native_ms", "conditioner_ms", "refine_ms"):
         if not isinstance(row.get(key), (float, int)) or not math.isfinite(row[key]) or row[key] < 0:
             raise ValueError(f"Invalid timing: {token}/{key}")
+    if row.get("native_origin") == "external-handoff":
+        audit = row.get("k0_metric_audit", {})
+        if (row.get("native_forward_executed") is not False
+                or row["native_ms"] != 0. or audit.get("tolerance") != K0_AUDIT_TOLERANCE
+                or not _valid_digest(audit.get("trajectory_sha256"))):
+            raise ValueError(f"Missing external K0 replay audit: {token}")
+        verified = verify_k0_metrics(audit.get("metrics", {}), row["metrics"]["0"])
+        if audit.get("max_abs_error") != verified:
+            raise ValueError(f"External K0 replay audit changed: {token}")
     if baseline is not None:
-        for key in ("log", "native_seed", "condition_sha256", "metric_cache_sha256"):
+        external = baseline.get("native_origin") == "external-handoff"
+        keys = ("log", "native_seed") if external else ("log", "native_seed", "condition_sha256", "metric_cache_sha256")
+        for key in keys:
             if row[key] != baseline[key]:
                 raise ValueError(f"Reused native record differs: {token}/{key}")
+        if external and (row.get("native_origin") != "external-handoff"
+                         or row["k0_metric_audit"]["trajectory_sha256"] != baseline["trajectory_sha256"]):
+            raise ValueError(f"External native trajectory provenance changed: {token}")
         if (row["trajectories"]["0"] != baseline["trajectories"]["0"]
                 or row["metrics"]["0"] != baseline["metrics"]["0"]):
             raise ValueError(f"K0 changed: {token}")
     return row
+
+
+def verify_k0_metrics(current, original):
+    """Replay the saved trajectory, never the native sampler, before K0 reuse.
+
+    External CSV/NPZ handoffs lack native-time per-cache hashes. Matching every
+    metric under the current scorer is an explicit compatibility check, not a
+    claim that missing historical hashes or conditions were recorded.
+    """
+    if set(current) != METRICS or set(original) != METRICS:
+        raise ValueError("K0 metric replay requires all seven original metrics")
+    errors = {key: abs(float(current[key]) - float(original[key])) for key in METRICS}
+    if any(not math.isfinite(value) or value > K0_AUDIT_TOLERANCE for value in errors.values()):
+        raise ValueError(f"Saved K0 metric replay differs from the handoff: {errors}")
+    return max(errors.values())
 
 
 def read_completed_shard(directory):
@@ -204,6 +234,89 @@ def _verified_summary(output, protocol, rows):
     return summary
 
 
+def collect_baseline(output, expected_count=TOTAL):
+    """Read either our shards or the independently produced immutable CSV/NPZ."""
+    from .handoff import is_handoff, load_handoff
+    if not is_handoff(output):
+        return collect_completed(output)
+    imported = load_handoff(output, expected_count=expected_count,
+                            expected_token_digest=NAVTEST_TOKEN_DIGEST if expected_count == TOTAL else None)
+    rows = sorted(imported["rows"].values(), key=lambda row: row["token"])
+    protocol = dict(schema=imported["schema"], mode="baseline", split="navtest", ks=[0],
+                    native_seed=NATIVE_SEED, count=len(rows), token_digest=digest_tokens([r["token"] for r in rows]),
+                    identity=imported["identity"], external_handoff=True,
+                    handoff_manifest=imported["manifest"], handoff_summary=imported["summary"],
+                    handoff_provenance=imported["provenance"])
+    return protocol, rows, imported["provenance"]["files_sha256"]
+
+
+def baseline_reference(output, protocol=None, hashes=None):
+    if protocol is None or hashes is None:
+        protocol, _, hashes = collect_baseline(output)
+    if protocol.get("external_handoff"):
+        return protocol["handoff_provenance"]
+    return {"source": str(Path(output).resolve()), "files_sha256": hashes,
+            "summary_sha256": file_hash(Path(output) / "summary.json")}
+
+
+def audit_external_baseline(output, devkit_root, metric_cache, expected_identity=None, max_scenes=8):
+    """CPU compatibility preflight on diverse saved K0s before expensive training.
+
+    All tokens are checked again during paired evaluation. This small check is
+    explicitly not certification of full metric-cache or historical feature parity.
+    """
+    from .native import activate_devkit
+    import numpy as np
+    activate_devkit(devkit_root)
+    from hydra.utils import instantiate
+    from omegaconf import OmegaConf
+    from navsim.common.dataloader import MetricCacheLoader
+    from navsim.common.dataclasses import Trajectory
+    from navsim.evaluate.pdm_score import pdm_score
+    protocol, rows, hashes = collect_baseline(output)
+    if not protocol.get("external_handoff"):
+        raise ValueError("Saved-K0 preflight requires an external handoff")
+    _require_external_identity(protocol, expected_identity)
+    if Path(protocol["handoff_manifest"]["metric_cache"]).resolve() != Path(metric_cache).resolve():
+        raise ValueError("External baseline metric cache path differs")
+    paths = metric_index(Path(metric_cache))
+    if set(row["token"] for row in rows) - paths.keys():
+        raise ValueError("Missing native metric-cache coverage")
+    class AllNodeMetricCache(MetricCacheLoader):
+        _load_metric_cache_paths = staticmethod(metric_index)
+    cache = AllNodeMetricCache(Path(metric_cache))
+    cfg = OmegaConf.load(Path(devkit_root) / "navsim/planning/script/config/pdm_scoring/default_scoring_parameters.yaml")
+    simulator, scorer = instantiate(cfg.simulator), instantiate(cfg.scorer)
+    if simulator.proposal_sampling != scorer.proposal_sampling:
+        raise ValueError("PDM scorer and simulator horizons differ")
+    ordered = sorted(rows, key=lambda row: (row["metrics"]["0"]["score"], row["token"]))
+    selected = {ordered[round(i * (len(rows)-1) / max(1, min(max_scenes, len(rows))-1))]["token"]
+                for i in range(min(max_scenes, len(rows)))}
+    checks = []
+    for row in rows:
+        if row["token"] not in selected:
+            continue
+        token = row["token"]
+        poses = np.asarray(row["trajectories"]["0"], dtype=row["trajectory_dtype"])
+        metrics = asdict(pdm_score(cache.get_from_token(token), Trajectory(poses),
+                                  simulator.proposal_sampling, simulator, scorer))
+        checks.append(dict(token=token, max_abs_error=verify_k0_metrics(metrics, row["metrics"]["0"]),
+                           metric_cache_sha256=file_hash(paths[token])))
+        print(f"Saved K0 metric preflight: {len(checks)}/{len(selected)} {token}", flush=True)
+    return dict(scope="sampled_saved_trajectory_metric_replay", passed=True,
+                sample_count=len(checks), total_count=len(rows), checks=checks,
+                full_replay_required_during_evaluation=True, tolerance=K0_AUDIT_TOLERANCE,
+                scoring_identity=scoring_identity(devkit_root), baseline=baseline_reference(output, protocol, hashes))
+
+
+def _require_external_identity(protocol, expected_identity):
+    if expected_identity is None:
+        return
+    for key in ("chainflow_commit", "checkpoint_sha256", "backbone_sha256"):
+        if not expected_identity.get(key) or protocol["identity"].get(key) != expected_identity[key]:
+            raise ValueError(f"External native conditioner identity differs: {key}")
+
+
 def validate_native_baseline(output, expected_identity=None, expected_scoring=None, expected_count=TOTAL):
     """CPU-only gate for an independently completed native reproduction handoff.
 
@@ -211,7 +324,14 @@ def validate_native_baseline(output, expected_identity=None, expected_scoring=No
     expected_scoring from scoring_identity using the assets they will train with.
     No aggregate CSV is accepted in place of saved per-token native trajectories.
     """
-    protocol, rows, _ = collect_completed(output)
+    protocol, rows, _ = collect_baseline(output, expected_count=expected_count)
+    if protocol.get("external_handoff"):
+        _require_external_identity(protocol, expected_identity)
+        # The original score config is hash-checked by the adapter; current
+        # scorer equivalence is established per token by saved-K0 metric replay.
+        return {**protocol["handoff_summary"], "mode": "baseline", "protocol": protocol,
+                "current_scoring_identity": expected_scoring,
+                "k0_metric_replay_required": True}
     if (protocol.get("schema") != SCHEMA or protocol.get("mode") != "baseline"
             or protocol.get("split") != "navtest" or protocol.get("ks") != [0]
             or protocol.get("native_seed") != NATIVE_SEED or len(rows) != expected_count):
@@ -226,21 +346,31 @@ def validate_native_baseline(output, expected_identity=None, expected_scoring=No
 
 
 def load_baseline(output, expected, selected, needed=None):
-    protocol, rows, hashes = collect_completed(output)
+    protocol, rows, hashes = collect_baseline(output, expected_count=len(selected))
+    external = protocol.get("external_handoff", False)
     if protocol.get("mode") != "baseline" or protocol["ks"] != [0]:
         raise ValueError("Require a native ChainFlow baseline, not DD or a refined run")
-    for key in COMPATIBLE:
-        if protocol.get(key) != expected.get(key):
-            raise ValueError(f"Baseline protocol mismatch: {key}")
+    if external:
+        _require_external_identity(protocol, expected.get("identity"))
+        if (expected.get("split") != "navtest" or expected.get("native_seed") != NATIVE_SEED
+                or expected.get("token_digest") != protocol["token_digest"]):
+            raise ValueError("External baseline split/seed/token membership differs")
+        original_cache = Path(protocol["handoff_manifest"]["metric_cache"]).resolve()
+        if original_cache != Path(expected["metric_cache"]).resolve():
+            raise ValueError("External baseline metric cache path differs")
+    else:
+        for key in COMPATIBLE:
+            if protocol.get(key) != expected.get(key):
+                raise ValueError(f"Baseline protocol mismatch: {key}")
     if sorted(r["token"] for r in rows) != selected:
         raise ValueError("Baseline token membership changed")
-    _verified_summary(output, protocol, rows)
+    if not external:
+        _verified_summary(output, protocol, rows)
     required = set(selected if needed is None else needed)
     result = {r["token"]: r for r in rows if r["token"] in required}
     if set(result) != required:
         raise ValueError("Missing required native baseline tokens")
-    return result, {"source": str(Path(output).resolve()), "files_sha256": hashes,
-                    "summary_sha256": file_hash(Path(output) / "summary.json")}
+    return result, baseline_reference(output, protocol, hashes)
 
 
 def resume_prefix(directory, manifest, logs, baseline=None):
@@ -383,16 +513,23 @@ def run(args):
                         (raw, condition), native_ms = timed(lambda: native_predict(agent, scene, args.device), args.device)
                     else:
                         source = baseline[token]
-                        if source["log"] != logs[token] or source["metric_cache_sha256"] != cache_hash:
+                        external = source.get("native_origin") == "external-handoff"
+                        if source["log"] != logs[token] or (not external and source["metric_cache_sha256"] != cache_hash):
                             raise ValueError("Native K0 log or metric cache changed")
-                        raw = torch.tensor(source["trajectories"]["0"], device=args.device, dtype=torch.float32)[None]
+                        dtype = getattr(torch, source["trajectory_dtype"]) if external else torch.float32
+                        raw = torch.tensor(source["trajectories"]["0"], device=args.device, dtype=dtype)[None]
                         condition, conditioner_ms = timed(lambda: encode_scene(agent, scene, args.device), args.device)
                     condition_hash = condition_digest(condition)
-                    if baseline is not None and condition_hash != baseline[token]["condition_sha256"]:
+                    if baseline is not None and not external and condition_hash != baseline[token]["condition_sha256"]:
                         raise ValueError("Frozen scene/VLM conditions differ from the native baseline")
                     metric = cache.get_from_token(token)
                     def score_fn(poses):
                         return asdict(pdm_score(metric, Trajectory(poses), simulator.proposal_sampling, simulator, scorer))
+                    audit = None
+                    if baseline is not None and external:
+                        replay = score_fn(raw[0].detach().cpu().numpy())
+                        audit = dict(metrics=replay, max_abs_error=verify_k0_metrics(replay, source["metrics"]["0"]),
+                                     tolerance=K0_AUDIT_TOLERANCE, trajectory_sha256=source["trajectory_sha256"])
                     trajectories, metrics, delta, elapsed = score_arms(
                         raw, condition, steps, refiner, score_fn, args.device, args.gamma,
                         None if baseline is None else baseline[token]["metrics"]["0"],
@@ -401,6 +538,10 @@ def run(args):
                                condition_sha256=condition_hash, metric_cache_sha256=cache_hash,
                                trajectories=trajectories, metrics=metrics, delta=delta,
                                native_ms=native_ms, conditioner_ms=conditioner_ms, refine_ms=elapsed)
+                    if audit is not None:
+                        row.update(native_origin="external-handoff", native_forward_executed=False,
+                                   k0_metric_audit=audit,
+                                   condition_hash_scope="first_observed_during_refinement")
                     validate_row(row, token, logs[token], steps, None if baseline is None else baseline[token])
                     stream.write(json.dumps(row, allow_nan=False) + "\n")
                     stream.flush()

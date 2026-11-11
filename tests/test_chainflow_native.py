@@ -134,6 +134,41 @@ def test_release_identity_is_pinned_to_85k_and_rejects_other_weights(tmp_path):
         native.validate_release_manifest(path, native.OFFICIAL_85K_SHA256, "b" * 64)
 
 
+def test_native_navtest_wrapper_reuses_parent_release_without_copying(tmp_path):
+    from score_function.utils.train_utils import atomic_write
+    parent = tmp_path / "release_manifest.json"
+    atomic_write(parent, {"release": "pinned"})
+    wrapper = tmp_path / native.NAVTEST_VLM_WRAPPER
+    wrapper.mkdir()
+    assert native.release_manifest_path(tmp_path) == parent
+    assert native.release_manifest_path(wrapper) == parent
+    assert not (wrapper / "release_manifest.json").exists()
+    # A declaration is an identity input, never evidence that data was extracted.
+    assert list(wrapper.iterdir()) == []
+
+
+def test_navtest_wrapper_rejects_conflicting_release_declaration(tmp_path):
+    from score_function.utils.train_utils import atomic_write
+    wrapper = tmp_path / native.NAVTEST_VLM_WRAPPER
+    wrapper.mkdir()
+    atomic_write(tmp_path / "release_manifest.json", {"release": "pinned"})
+    atomic_write(wrapper / "release_manifest.json", {"release": "different"})
+    with pytest.raises(ValueError, match="Conflicting"):
+        native.release_manifest_path(wrapper)
+
+
+def test_unrelated_cache_cannot_inherit_arbitrary_parent_release(tmp_path):
+    from score_function.utils.train_utils import atomic_write
+    atomic_write(tmp_path / "release_manifest.json", {"release": "pinned"})
+    cache_root = tmp_path / "another_cache"
+    cache_root.mkdir()
+    with pytest.raises(FileNotFoundError):
+        native.release_manifest_path(cache_root)
+    direct = cache_root / "release_manifest.json"
+    atomic_write(direct, {"release": "own"})
+    assert native.release_manifest_path(cache_root) == direct
+
+
 def test_load_agent_requires_all_checkpoint_keys_and_freezes_complete_model(monkeypatch, tmp_path):
     class MinimalAgent(torch.nn.Linear):
         def __init__(self, **kwargs):

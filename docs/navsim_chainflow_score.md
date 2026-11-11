@@ -21,7 +21,7 @@ Score 仍然学习加噪轨迹的条件密度梯度。主视觉条件来自官�
 | 地图 | `/home/data/wyk/dataset/nuplan/maps` |
 | 已有 GT 与划分缓存 | `/home/data/wyk/dataset/navsim/exp/dd_score_cache_v1` |
 | 官方 VLM 缓存 | `/home/data/wyk/dataset/navsim/chainflow_vlm_cache` |
-| 原生 K0 | `/home/data/wyk/dataset/navsim/exp/chainflow_native_navtest_v1` |
+| 已完成原生 K0 | `/home/data/wyk/dataset/navsim/exp/chainflow_native_navtest_v1/run_native_stage2_navtrain` |
 | 新条件缓存 | `/home/data/wyk/dataset/navsim/exp/chainflow_score_cache_v1` |
 | 训练输出 | `/home/data/wyk/dataset/navsim/exp/chainflow_score_v1` |
 | 配对评测 | `/home/data/wyk/dataset/navsim/exp/chainflow_score_navtest_v1` |
@@ -31,16 +31,19 @@ train=85,109，val=18,179；继承已有缓存的精确 token、物理 GT 和仅
 
 不重新下载 nuplan-devkit，不另套一个全量 OpenScene trainval 数据集。代码、环境和数据保持上面的分离方式。
 
-## 资产准备
+## 接入已经完成的原生复现
 
-原生复现 agent 可先运行 `scripts/setup_navsim_chainflow.sh --scope native`，只准备模型和 navtest VLM，约109.6 GB压缩资产。Score 训练需要 `--scope all`，全部发布资产合计1,035,243,638,403 bytes，另需解压和 mmap 缓存空间。下载器按已完成校验跳过资产；稳定的 `release_manifest.json` 不随下载进度改变，`assets.json` 记录完成情况。
+本次外部交接格式是 `chainflow-native-reproduction-v1`：`reproduction_ready.json` 指向逐场景 CSV，以及 `trajectories/token_index.json` 中记录的 NPZ 文件。NPZ 的 `trajectory` 是 float64 `[8,3]`。读取路径一律来自交接文件，保留轨迹精度，不转换并覆盖已有文件。基线为 12,146 场景、PDMS 93.8194331；不是 DD 的88.0337。
 
-```bash
-cd /home/data/wyk/Score_Function_NAVSIM_ChainFlow
-bash scripts/setup_navsim_chainflow.sh --scope all
-```
+接入时验证官方提交、checkpoint/DINO SHA、配置/指标/索引/逐轨迹 SHA、完整 token 集、valid、指标范围和均值。当前评分器先在8个有不同分数的已有 K0 上做 CPU 兼容预检；完整 K 评测时仍逐 token 重评分已有 K0，分项一致才放行。这里重评分的是已经保存的轨迹，不调用原生规划器再次采样。
 
-如果公司代理确实需要临时绕过证书校验，增加显式 `--insecure`。继承终端代理，不输出或写入代理密码，不修改全局 Git/Conda 配置。已存在的原生代码提交或环境不符合预期时脚本停止并说明原因，不覆盖它们。
+外部交接没有记录历史逐场景条件哈希、metric-cache 哈希和推理耗时；代码明确保留这些缺项，不能把现在计算的哈希冒充原生评测时的记录。生成条件和配对评测会记录当前内容哈希，并对每个场景执行 K0 指标重放检查。预检通过不代表未来所有文件都不会变化。
+
+继续使用已有 `/home/data/wyk/envs/chainflow` 环境（原生评测使用 PyTorch 2.5.1+cu124）。这个续接流程不运行 `setup_navsim_chainflow.sh`，不重建环境、重新下载权重或 navtest。
+
+训练所需的 train/val VLM 如果已有完整103,288文件则直接复用；缺少时 `--prepare-assets` 只准备官方24个 trainval 压缩分片，从空目录开始共 **926,302,926,122 bytes（约926.3 GB）**，另需解压及冻结条件缓存空间。已经由本下载器校验并解压完成的分片自动跳过。此处补的是VLM hidden states，不是全量OpenScene原始传感器数据。原有 navtest wrapper 路径直接使用，无需搬动或复制。
+
+下载只在本进程使用当前终端代理。默认验证证书；如果公司代理仍要求临时跳过验证，可在下面命令加 `--insecure-downloads`，仅影响训练 VLM 下载。已完成的部分下载遇到错误的 HTTP200 Range响应会保留，不截断重下；最终大小与SHA通过后才解压。需要 `zstandard` 包，缺少时会在开始大文件下载前报错。
 
 ## 网络与训练配置
 
@@ -71,16 +74,20 @@ bash scripts/setup_navsim_chainflow.sh --scope all
 
 运行入口为 `scripts/run_navsim_chainflow.py`，以 `--help` 为参数准。完整队列依次验证原生交接、检查数据、生成条件缓存、做真实小批训练/验证预检、训练500轮、自动配对评测K=5/10/15/20/30。预检只检查代码和数据通路，临时模型不进入正式训练输出。
 
-在 `--scope all` 资产准备完成后启动；原生K0可以由另一位agent继续跑，Score队列会等待完整交接：
+原生交接已经完整时，使用以下命令把数据准备与训练接成一个队列。先把 Score 工作树更新到 `codex/navsim-chainflow-score-1110` 的本次交接适配版本；不要把这些脚本复制进原生 ChainFlow 仓库。
 
 ```bash
 cd /home/data/wyk/Score_Function_NAVSIM_ChainFlow
 mkdir -p /home/data/wyk/dataset/navsim/exp/chainflow_score_pipeline
-nohup /home/data/wyk/envs/chainflow/bin/python -u scripts/run_navsim_chainflow.py run \
-  --workers 4 --microbatch-size 16 \
+nohup nice -n 19 /home/data/wyk/envs/chainflow/bin/python -u scripts/run_navsim_chainflow.py run \
+  --baseline /home/data/wyk/dataset/navsim/exp/chainflow_native_navtest_v1/run_native_stage2_navtrain \
+  --navtest-vlm-cache /home/data/wyk/dataset/navsim/chainflow_vlm_cache/navtest_recogdrive_vlm2B_traj_cache_first_forward \
+  --prepare-assets --workers 4 --microbatch-size 16 \
   >> /home/data/wyk/dataset/navsim/exp/chainflow_score_pipeline/queue.log 2>&1 < /dev/null &
 echo "Score 队列 PID=$!"
 ```
+
+顺序是：验证原生交接与评分兼容性 → 补齐训练VLM → 检查相机/VLM完整性 → 冻结条件缓存 → 真实训练预检 → 500轮训练 → final EMA 配对评测。原生代码必须仍是官方提交且 `navsim/` 下没有已跟踪的修改；若复现 agent 曾加过导出补丁，应另建官方提交的干净 git worktree，并通过 `--devkit-root` 指向它，权重路径仍复用已有文件。不自动清理或覆盖复现 agent 的源码。
 
 持续查看：
 
@@ -96,13 +103,9 @@ python3 /home/data/wyk/Score_Function_NAVSIM_ChainFlow/scripts/run_navsim_chainf
 
 ## 原生结果交接与配对约束
 
-独立 agent 应优先用 `scripts/eval_navsim_chainflow.py run --mode baseline` 生成标准交接。原生结果包括分片JSONL、完整summary和 `reproduction_ready.json`。后续队列校验真实文件和哈希，不仅检查这个标记是否存在。
+同时支持本仓库的原生分片JSONL交接和本次外部CSV+NPZ交接。前者保留其严格的历史条件/metric cache哈希校验；后者使用明确的外部来源类型，保留缺失的历史字段，并额外要求当前评分器对已保存 K0 的逐指标重放一致。两者都要求12,146个token的完整集合一致。
 
-原生与refine需要相同代码、官方checkpoint、DINO、VLM release、每场景条件内容、metric cache内容与评分配置。12,146个token的完整成员集合也固定。refine读取同一次原生forward留下的top-1轨迹，K0不重新采样、不做坐标来回转换，也不复用DD的88.0337基线。
-
-`summary.json` 中PDMS分项为0–1，展示乘100。K0来自新ChainFlow原生评测，所有K在同一批场景配对。任何场景失败使该阶段失败，不能排除失败场景后宣布完成。
-
-若另一位agent独立实现了不同交付格式，先做无损导入和协议核对再接本队列，不能只放一个JSON标记绕过验证。
+所有K从同一次原生 forward 留下的 top-1 轨迹出发，K0 轨迹和原始 CSV 分项精确复用，不重新采样。外部NPZ的float64 K0保持不变；refine内部按训练时FP32计算，仅新增 refine 后结果。`summary.json` 的分数是0–1，展示时乘100。任何场景失败使阶段失败，不能排除失败场景后宣布完成。
 
 ## 本地验证范围
 

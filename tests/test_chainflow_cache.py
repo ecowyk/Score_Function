@@ -137,9 +137,11 @@ def test_path_escape_is_rejected(tmp_path):
         cache.inside(tmp_path, "../other")
 
 
-def test_cpu_coverage_reports_missing_camera_before_gpu_work(tmp_path, monkeypatch):
+@pytest.mark.parametrize("separate_navtest", [False, True])
+def test_cpu_coverage_reports_missing_camera_before_gpu_work(tmp_path, monkeypatch, separate_navtest):
     from types import SimpleNamespace
     root, vlm, output = (tmp_path / p for p in ("data", "vlm", "cache"))
+    navtest_vlm = vlm / "native_wrapper" if separate_navtest else vlm
     output.mkdir()
     loaders = {}
     for split, part in (("train", "trainval"), ("navtest", "test")):
@@ -152,7 +154,8 @@ def test_cpu_coverage_reports_missing_camera_before_gpu_work(tmp_path, monkeypat
             if not (split == "navtest" and camera == "cam_r0"):
                 path.write_bytes(b"image")
             cameras[camera.upper()] = {"data_path": relative}
-        feature = vlm / log / token / "internvl_feature.gz"
+        feature_root = navtest_vlm if split == "navtest" else vlm
+        feature = feature_root / log / token / "internvl_feature.gz"
         feature.parent.mkdir(parents=True)
         feature.write_bytes(b"feature")
         frame = {"log_name": log, "cams": cameras}
@@ -161,6 +164,8 @@ def test_cpu_coverage_reports_missing_camera_before_gpu_work(tmp_path, monkeypat
     monkeypatch.setattr(cache, "activate_devkit", lambda path: path)
     monkeypatch.setattr(cache, "make_scene_loader", lambda data, devkit, split, *args, **kw: loaders[split])
     args = SimpleNamespace(data_root=root, vlm_cache=vlm, cache_dir=output, devkit_root=tmp_path)
+    if separate_navtest:
+        args.navtest_vlm_cache = navtest_vlm
     tasks = [{"split": "train", "log_name": "train-log", "records": [{"token": "train-token"}]}]
     with pytest.raises(ValueError, match="coverage is incomplete"):
         cache.check_data(args, tasks)
@@ -170,6 +175,17 @@ def test_cpu_coverage_reports_missing_camera_before_gpu_work(tmp_path, monkeypat
     assert report["missing_examples"][0]["kind"] == "cam_r0"
     assert report["history_images_required"] is False
     assert report["compressed_vlm_bytes"] == {"train": 7, "val": 0, "navtest": 7}
+    assert report["vlm_roots"] == {"trainval": str(vlm.resolve()), "navtest": str(navtest_vlm.resolve())}
+
+    if separate_navtest:
+        # Missing the explicit native root must be visible; a release declaration
+        # or feature in another split directory cannot satisfy coverage.
+        args.navtest_vlm_cache = None
+        with pytest.raises(ValueError, match="coverage is incomplete"):
+            cache.check_data(args, tasks)
+        report = read_json(output / "coverage.json")
+        assert report["missing_count"] == 2
+        assert {item["kind"] for item in report["missing_examples"]} == {"cam_r0", "VLM"}
 
 
 def test_disk_space_failure_does_not_publish_completed_cache(fixture_cache, monkeypatch):

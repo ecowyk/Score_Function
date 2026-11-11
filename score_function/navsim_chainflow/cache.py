@@ -307,6 +307,8 @@ def check_data(args, tasks):
     missing, counts = [], {"train": 0, "val": 0, "navtest": 0}
     missing_count = 0
     vlm_bytes = {"train": 0, "val": 0, "navtest": 0}
+    trainval_vlm = Path(args.vlm_cache).expanduser().resolve()
+    navtest_vlm = Path(getattr(args, "navtest_vlm_cache", None) or trainval_vlm).expanduser().resolve()
 
     def record_missing(kind, value):
         nonlocal missing_count
@@ -328,7 +330,8 @@ def check_data(args, tasks):
                 path = sensor_root / cameras[camera]["data_path"] if camera in cameras else None
                 if path is None or not path.is_file():
                     record_missing(camera, path or f"{token}/{camera}")
-            cache = Path(args.vlm_cache) / frame["log_name"] / token / "internvl_feature.gz"
+            vlm_root = navtest_vlm if split == "navtest" else trainval_vlm
+            cache = vlm_root / frame["log_name"] / token / "internvl_feature.gz"
             if not cache.is_file() or cache.stat().st_size == 0:
                 record_missing("VLM", cache)
             else:
@@ -346,6 +349,7 @@ def check_data(args, tasks):
     report = {"state": "ready" if complete else "failed", "counts": counts,
               "missing_count": missing_count, "missing_examples": missing,
               "cameras": list(CAMERAS), "history_images_required": False,
+              "vlm_roots": {"trainval": str(trainval_vlm), "navtest": str(navtest_vlm)},
               "compressed_vlm_bytes": vlm_bytes,
               "cache_storage": "Full uncompressed FP16 VLM sequences; additional space required. "
                                "Compressed bytes and filesystem free-space reports are not a guarantee.",
@@ -399,6 +403,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("source-cache", "cache-dir", "checkpoint", "backbone", "vlm-cache", "data-root", "devkit-root"):
         parser.add_argument("--" + name, required=True, type=Path)
+    parser.add_argument("--navtest-vlm-cache", type=Path,
+                        help="Existing native navtest cache root; defaults to --vlm-cache. Used for the CPU coverage audit only.")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--check-data", action="store_true", help="CPU-only coverage audit, no model allocation")
     parser.add_argument("--rank", type=int, help=argparse.SUPPRESS)

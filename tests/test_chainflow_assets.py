@@ -51,8 +51,35 @@ class AssetTests(unittest.TestCase):
             "Content-Length": str(len(body)-6)})], partial=body[:6])
         self.assertEqual(opener.call_args.args[0].get_header("Range"), "bytes=6-")
 
-    def test_ignored_range_replaces_instead_of_appending(self):
-        self.download(b"binary asset bytes", [Response(b"binary asset bytes")], partial=b"binary")
+    def test_ignored_range_preserves_partial_without_reading_response(self):
+        body = b"binary asset bytes"
+        partial = self.destination.with_suffix(".bin.part")
+        partial.write_bytes(body[:6])
+        responses = [Response(body), Response(body)]
+        for response in responses:
+            response.read = mock.Mock(side_effect=AssertionError("Must not read rejected body"))
+        opener = mock.Mock(side_effect=responses)
+        with self.assertRaises(RuntimeError):
+            assets.download(asset_for(body), self.destination, opener=opener,
+                            pause=lambda _: None, attempts=2)
+        self.assertEqual(partial.read_bytes(), body[:6])
+        self.assertFalse(self.destination.exists())
+        self.assertFalse(list(self.root.glob("*.bad-*")))
+        for response in responses:
+            response.read.assert_not_called()
+        self.assertEqual([call.args[0].get_header("Range") for call in opener.call_args_list],
+                         ["bytes=6-", "bytes=6-"])
+
+    def test_ignored_range_then_valid_response_resumes_same_prefix(self):
+        body = b"binary asset bytes"
+        ignored = Response(body)
+        ignored.read = mock.Mock(side_effect=AssertionError("Must not read rejected body"))
+        opener = self.download(body, [ignored, Response(body[6:], 206, {
+            "Content-Range": f"bytes 6-{len(body)-1}/{len(body)}",
+            "Content-Length": str(len(body)-6)})], partial=body[:6])
+        ignored.read.assert_not_called()
+        self.assertEqual([call.args[0].get_header("Range") for call in opener.call_args_list],
+                         ["bytes=6-", "bytes=6-"])
 
     def test_mismatched_range_never_appends(self):
         partial = self.destination.with_suffix(".bin.part")
@@ -119,6 +146,15 @@ class AssetTests(unittest.TestCase):
         self.assertEqual(sum(row["size"] for row in native), 109598014883)
         self.assertEqual(sum(row["size"] for row in plan["assets"] if row["role"] == "vlm_archive"), 1035243638403)
         self.assertEqual(len(assets.selected_assets(plan, "trainval")), 24)
+
+    def test_trainval_only_preparation_never_selects_existing_native_assets(self):
+        plan = assets.load_plan()
+        selected = assets.selected_assets(plan, only="trainval", scope="all")
+        self.assertEqual(len(selected), 24)
+        self.assertTrue(all(row["role"] == "vlm_archive" and row["path"].startswith("trainval/")
+                            for row in selected))
+        native_hashes = {row["sha256"] for row in assets.selected_assets(plan, scope="native")}
+        self.assertFalse(native_hashes & {row["sha256"] for row in selected})
 
 
 class ArchiveTests(unittest.TestCase):
