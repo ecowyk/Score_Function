@@ -58,6 +58,70 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(evaluate[i+1:i+6], ['5','10','15','20','30'])
         self.assertEqual(evaluate[evaluate.index('--mode')+1], 'refine')
 
+    def test_b64_recipe_isolates_training_and_evaluates_its_epoch_40_ema(self):
+        args = queue.parse_args(['run', '--recipe', 'b64-e40', '--root', str(self.root)])
+        cfg = queue.effective_config(args)
+        self.assertEqual((args.workers, args.microbatch_size, cfg['global_batch_size']), (8, 8, 64))
+        self.assertEqual((cfg['epochs'], cfg['checkpoint_start_epoch'], cfg['checkpoint_every_epochs']), (40, 5, 5))
+        self.assertEqual(cfg['model'], queue.effective_config(self.args)['model'])
+        for name in ('cache', 'source_cache', 'checkpoint', 'metric_cache'):
+            self.assertEqual(getattr(args, name), getattr(self.args, name))
+        for name in ('training', 'evaluation', 'output'):
+            self.assertNotEqual(getattr(args, name), getattr(self.args, name))
+        self.write(self.args.training/'run.json', {})
+        command = queue.train_command(args, args.workers)
+        self.assertNotIn('--resume', command)
+        self.assertIn('--nproc_per_node=8', command)
+        self.assertEqual(command[command.index('--config')+1], str(args.config))
+        helper = queue.parse_args(queue.helper_command(args, '_preflight')[3:])
+        self.assertEqual(queue.effective_config(helper), cfg)
+        self.assertEqual((helper.recipe, helper.output), (args.recipe, args.output))
+        evaluate = queue.eval_command(args, args.workers)
+        for flag, expected in [('--mode', 'refine'), ('--weight-kind', 'ema'), ('--expected-epoch', '40'),
+                               ('--score-checkpoint', str(args.training/'final_ema.pt')),
+                               ('--baseline', str(args.baseline))]:
+            self.assertEqual(evaluate[evaluate.index(flag)+1], expected)
+        i = evaluate.index('--ks')
+        self.assertEqual(evaluate[i+1:i+6], ['5', '10', '15', '20', '30'])
+
+    def test_b64_queue_uses_prepared_cache_and_skips_old_asset_stages(self):
+        args = queue.parse_args(['run', '--recipe', 'b64-e40', '--root', str(self.root),
+                                 '--python', sys.executable])
+        self.write(args.cache/'TRAINING_READY.json', {})
+        runner = queue.Queue(args)
+        stages = []
+        with mock.patch.object(runner, 'execute', side_effect=lambda stage, *a: stages.append(stage)), \
+                mock.patch.object(runner, 'gpu', side_effect=lambda stage, *a, **k: stages.append(stage)), \
+                mock.patch.object(runner, 'wait_baseline', side_effect=lambda: stages.append('wait_native')), \
+                mock.patch.object(queue, 'training_complete', side_effect=[False, True]):
+            runner.run()
+        self.assertEqual(stages, ['wait_native', 'verify_cache', 'preflight', 'train', 'evaluate', 'verify_evaluation'])
+        self.assertEqual((runner.state['epochs'], runner.state['status']), (40, 'complete'))
+
+    def test_b64_reports_a_missing_native_handoff_without_waiting(self):
+        args = queue.parse_args(['run', '--recipe', 'b64-e40', '--root', str(self.root)])
+        self.assertEqual(args.baseline, self.args.baseline/'run_native_stage2_navtrain')
+        with mock.patch.object(queue.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(FileNotFoundError, 'native K0'):
+                queue.Queue(args).wait_baseline()
+        sleep.assert_not_called()
+
+    def test_b64_inherits_asset_paths_only_from_the_legacy_plan(self):
+        self.args.baseline = self.root/'external-native'/'run_native_stage2_navtrain'
+        self.args.navtest_vlm_cache = self.root/'test-vlm-release'
+        self.args.cache = self.root/'existing-training-cache'
+        self.args.gpu_lock_dir = self.root/'shared-leases'
+        plan = self.args.output/'plan.json'
+        self.write(plan, queue.plan_for(self.args))
+        override = self.root/'explicit-override'
+        args = queue.parse_args(['run', '--root', str(self.root), '--recipe', 'b64-e40',
+                                 '--assets-from-plan', str(plan), '--metric-cache', str(override)])
+        for name in ('baseline', 'navtest_vlm_cache', 'cache', 'gpu_lock_dir'):
+            self.assertEqual(getattr(args, name), getattr(self.args, name))
+        for name in ('training', 'evaluation', 'output', 'config'):
+            self.assertNotEqual(getattr(args, name), getattr(self.args, name))
+        self.assertEqual((args.metric_cache, args.workers, args.microbatch_size), (override, 8, 8))
+
     def test_external_handoff_selects_existing_test_vlm_without_moving_it(self):
         baseline = self.root/'external-native'
         wrapper = self.root/'already-downloaded-test-wrapper'
@@ -135,22 +199,29 @@ class PipelineTests(unittest.TestCase):
             queue.cached_world(self.args, 'train')
 
     def test_training_completion_requires_config_cache_and_checkpoint_hashes(self):
-        self.assertFalse(queue.training_complete(self.args))
+        for recipe in ('v1', 'b64-e40'):
+            with self.subTest(recipe=recipe):
+                args = queue.parse_args(['run', '--root', str(self.root), '--recipe', recipe])
+                self.check_training_completion(args)
+
+    def check_training_completion(self, args):
+        self.assertFalse(queue.training_complete(args))
         metadata = {'x': 'same-cache'}
         fingerprint = hashlib.sha256(json.dumps(metadata, sort_keys=True).encode()).hexdigest()
-        self.write(self.args.cache/'manifest.json', metadata)
-        self.write(self.args.training/'run.json', {'signature': 'sig', 'config': queue.effective_config(self.args),
-                                                   'protocol': {'cache_fingerprint': fingerprint}})
-        marker = {'signature': 'sig', 'epochs': 500}
+        cfg = queue.effective_config(args)
+        self.write(args.cache/'manifest.json', metadata)
+        self.write(args.training/'run.json', {'signature': 'sig', 'config': cfg,
+                                              'protocol': {'cache_fingerprint': fingerprint}})
+        marker = {'signature': 'sig', 'epochs': cfg['epochs']}
         for kind in ('raw', 'ema'):
-            path = self.args.training/f'final_{kind}.pt'
+            path = args.training/f'final_{kind}.pt'
             path.write_bytes(kind.encode())
             marker[f'final_{kind}_sha256'] = queue.sha256(path)
-        self.write(self.args.training/'TRAINING_COMPLETE.json', marker)
-        self.assertTrue(queue.training_complete(self.args))
-        (self.args.training/'final_ema.pt').write_bytes(b'changed')
+        self.write(args.training/'TRAINING_COMPLETE.json', marker)
+        self.assertTrue(queue.training_complete(args))
+        (args.training/'final_ema.pt').write_bytes(b'changed')
         with self.assertRaisesRegex(ValueError, 'checksum'):
-            queue.training_complete(self.args)
+            queue.training_complete(args)
 
     def test_wait_native_never_acquires_gpu_and_validates_after_publication(self):
         runner = queue.Queue(self.args)

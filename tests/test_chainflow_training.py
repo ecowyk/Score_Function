@@ -197,6 +197,15 @@ class ChainFlowTrainingTests(unittest.TestCase):
         self.assertEqual(load_tensor(run / "last.pt")["step"], 3)
         self.assertEqual(read_json(run / "run.json")["global_batch"], 4)
 
+    def test_b64_e40_learning_rate_uses_optimizer_update_counts(self):
+        cfg = read_json(Path(__file__).resolve().parents[1] / "configs/navsim_chainflow_s10g_b64_e40.json")
+        trainer.check_config(cfg)
+        updates = 85109 // cfg["global_batch_size"]
+        self.assertEqual((updates, updates * cfg["epochs"]), (1329, 53160))
+        for step, rate in [(0, 2e-10), (5315, 2e-4), (5316, 2e-4), (53159, 0.)]:
+            with self.subTest(step=step):
+                self.assertAlmostEqual(trainer.learning_rate(cfg, step, updates), rate, places=15)
+
     @unittest.skipUnless(dist.is_available() and dist.is_gloo_available(), "Gloo unavailable")
     def test_two_rank_ddp_accumulation_uneven_validation_and_completed_resume(self):
         cfg = copy.deepcopy(self.cfg)

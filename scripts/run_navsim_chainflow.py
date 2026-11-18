@@ -22,6 +22,8 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 KS = [5, 10, 15, 20, 30]
+SHARED_PATHS = ('python', 'devkit_root', 'checkpoint', 'backbone', 'vlm_cache', 'navtest_vlm_cache',
+                'data_root', 'metric_cache', 'source_cache', 'baseline', 'cache', 'gpu_lock_dir')
 
 
 def read_json(path):
@@ -53,10 +55,10 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def paths_for(root):
+def paths_for(root, recipe='v1'):
     root = Path(root).resolve()
     exp = root / 'dataset/navsim/exp'
-    return dict(python=root/'envs/chainflow/bin/python', devkit_root=root/'ChainFlow-VLA',
+    paths = dict(python=root/'envs/chainflow/bin/python', devkit_root=root/'ChainFlow-VLA',
                 checkpoint=root/'ChainFlow-VLA/weights/stage_2/stage2_navtrain_9382.ckpt',
                 backbone=root/'ChainFlow-VLA/weights/vit_small_patch14_reg4_dinov2.lvd142m/model.safetensors',
                 vlm_cache=root/'dataset/navsim/chainflow_vlm_cache',
@@ -65,6 +67,11 @@ def paths_for(root):
                 baseline=exp/'chainflow_native_navtest_v1', cache=exp/'chainflow_score_cache_v1',
                 training=exp/'chainflow_score_v1', evaluation=exp/'chainflow_score_navtest_v1',
                 output=exp/'chainflow_score_pipeline', gpu_lock_dir=exp/'chainflow_gpu_leases')
+    if recipe == 'b64-e40':
+        paths.update(baseline=exp/'chainflow_native_navtest_v1/run_native_stage2_navtrain',
+                     training=exp/'chainflow_score_b64_e40', evaluation=exp/'chainflow_score_navtest_b64_e40',
+                     output=exp/'chainflow_score_pipeline_b64_e40')
+    return paths
 
 
 def environment(args):
@@ -86,13 +93,16 @@ def effective_config(args):
     cfg = read_json(args.config)
     cfg['microbatch_size'] = args.microbatch_size
     cfg['num_workers'] = args.loader_workers
-    if cfg.get('epochs') != 500 or cfg.get('checkpoint_every_epochs') != 50:
-        raise ValueError('This queue requires 500 epochs and a checkpoint every 50 epochs')
-    if cfg.get('global_batch_size') != 512 or cfg.get('sigma') != .1 or cfg.get('gamma') != .1:
-        raise ValueError('This queue requires global batch 512, sigma=0.1 and gamma=0.1')
+    epochs, interval, batch = (40, 5, 64) if args.recipe == 'b64-e40' else (500, 50, 512)
+    if cfg.get('epochs') != epochs or cfg.get('checkpoint_every_epochs') != interval:
+        raise ValueError(f'This recipe requires {epochs} epochs and a checkpoint every {interval} epochs')
+    if cfg.get('global_batch_size') != batch or cfg.get('sigma') != .1 or cfg.get('gamma') != .1:
+        raise ValueError(f'This recipe requires global batch {batch}, sigma=0.1 and gamma=0.1')
+    if args.recipe == 'b64-e40' and (args.workers, args.microbatch_size) != (8, 8):
+        raise ValueError('b64-e40 requires 8 GPUs and microbatch 8 per GPU')
     for workers in ((1, 2, 4, 8) if args.workers == 'auto' else (args.workers,)):
-        if 512 % (args.microbatch_size * workers):
-            raise ValueError('microbatch * workers must divide global batch 512')
+        if batch % (args.microbatch_size * workers):
+            raise ValueError(f'microbatch * workers must divide global batch {batch}')
     return cfg
 
 
@@ -102,10 +112,13 @@ def plan_for(args):
     for directory in ('model', 'utils'):
         source_files += sorted((REPO/'score_function'/directory).rglob('*.py'))
     source_files += [Path(__file__), REPO/'scripts/eval_navsim_chainflow.py']
-    return dict(schema='chainflow-score-pipeline-v1', config=cfg, ks=KS,
-                paths={name: str(getattr(args, name)) for name in paths_for(args.root)},
+    plan = dict(schema='chainflow-score-pipeline-v1', config=cfg, ks=KS,
+                paths={name: str(getattr(args, name)) for name in paths_for(args.root, args.recipe)},
                 source_sha256={str(p.relative_to(REPO)): sha256(p) for p in source_files},
                 baseline_mode='external_native_only', final_weights='ema')
+    if args.recipe == 'b64-e40':
+        plan.update(recipe=args.recipe, primary_k=20, training_workers=args.workers)
+    return plan
 
 
 def bind_plan(path, plan):
@@ -156,13 +169,14 @@ def training_complete(args):
         return False
     data = read_json(marker)
     run = read_json(args.training/'run.json')
-    if data.get('epochs') != 500 or data.get('signature') != run.get('signature'):
+    cfg = effective_config(args)
+    if data.get('epochs') != cfg['epochs'] or data.get('signature') != run.get('signature'):
         raise ValueError('Invalid training completion marker')
     metadata = read_json(args.cache/'manifest.json')
     fingerprint = hashlib.sha256(json.dumps(metadata, sort_keys=True).encode()).hexdigest()
     if run['protocol']['cache_fingerprint'] != fingerprint:
         raise ValueError('Completed training belongs to a different feature cache')
-    if run['config'] != effective_config(args):
+    if run['config'] != cfg:
         raise ValueError('Completed training configuration differs from this queue')
     for kind in ('raw', 'ema'):
         if sha256(args.training/f'final_{kind}.pt') != data[f'final_{kind}_sha256']:
@@ -206,15 +220,17 @@ def eval_command(args, workers, baseline=False):
         cmd += ['--'+key.replace('_', '-'), str(value)]
     if not baseline:
         cmd += ['--baseline', str(args.baseline), '--score-checkpoint', str(args.training/'final_ema.pt'),
-                '--ks', *map(str, KS), '--gamma', '.1', '--expected-epoch', '500', '--weight-kind', 'ema']
+                '--ks', *map(str, KS), '--gamma', '.1', '--expected-epoch', str(effective_config(args)['epochs']),
+                '--weight-kind', 'ema']
     return cmd
 
 
 def helper_command(args, mode):
     cmd = [str(args.python), '-u', str(Path(__file__).resolve()), mode, '--root', str(args.root),
-           '--config', str(args.config), '--microbatch-size', str(args.microbatch_size),
+           '--recipe', args.recipe, '--config', str(args.config), '--workers', str(args.workers),
+           '--microbatch-size', str(args.microbatch_size),
            '--loader-workers', str(args.loader_workers)]
-    for key in paths_for(args.root):
+    for key in paths_for(args.root, args.recipe):
         cmd += ['--'+key.replace('_', '-'), str(getattr(args, key))]
     cmd += ['--download-attempts', str(args.download_attempts), '--download-endpoint', args.download_endpoint]
     if args.insecure_downloads:
@@ -227,7 +243,9 @@ class Queue:
         self.args = args
         self.state = dict(status='running', stage='starting', pid=os.getpid(), host=socket.gethostname(),
                           started=now(), training=str(args.training), evaluation=str(args.evaluation),
-                          baseline=str(args.baseline), cache=str(args.cache), epochs=500, ks=KS)
+                          baseline=str(args.baseline), cache=str(args.cache), epochs=effective_config(args)['epochs'], ks=KS)
+        if args.recipe == 'b64-e40':
+            self.state.update(recipe=args.recipe, primary_k=20)
 
     def update(self, **values):
         self.state.update(values, updated=now())
@@ -295,6 +313,8 @@ class Queue:
     def wait_baseline(self):
         self.update(stage='wait_native', status='waiting_native', log=None)
         while not any((self.args.baseline/name).is_file() for name in ('summary.json', 'reproduction_ready.json')):
+            if self.args.recipe == 'b64-e40':
+                raise FileNotFoundError(f'Expected completed native K0 in {self.args.baseline}; check --baseline or --assets-from-plan')
             self.note(f'Waiting for independent native reproduction: {self.args.baseline}')
             self.update(status='waiting_native')
             time.sleep(self.args.poll)
@@ -304,11 +324,15 @@ class Queue:
         args = self.args
         if not args.python.is_file():
             raise FileNotFoundError(f'Create the ChainFlow conda environment first: {args.python}')
+        ready = args.cache/'TRAINING_READY.json'
+        if args.recipe == 'b64-e40' and not ready.is_file():
+            raise FileNotFoundError(f'b64-e40 requires the verified training cache at {ready}')
         self.wait_baseline()
-        if args.prepare_assets:
-            self.execute('prepare_assets', helper_command(args, '_prepare-assets'))
-        self.execute('check_data', cache_command(args, 1, check=True))
-        if (args.cache/'TRAINING_READY.json').is_file():
+        if args.recipe != 'b64-e40':
+            if args.prepare_assets:
+                self.execute('prepare_assets', helper_command(args, '_prepare-assets'))
+            self.execute('check_data', cache_command(args, 1, check=True))
+        if args.recipe == 'b64-e40' or ready.is_file():
             self.execute('verify_cache', helper_command(args, '_verify-cache'))
         else:
             self.gpu('cache', lambda n: cache_command(args, n))
@@ -319,13 +343,15 @@ class Queue:
             self.gpu('preflight', lambda n: helper_command(args, '_preflight'), workers=1)
             self.gpu('train', lambda n: train_command(args, n), workers=world)
             if not training_complete(args):
-                raise RuntimeError('Training exited without a verified 500-epoch final checkpoint')
+                raise RuntimeError(f"Training exited without a verified epoch-{self.state['epochs']} final checkpoint")
         world = cached_world(args, 'evaluate')
         # The eval launcher validates completed shards and skips them on a restart.
         if (args.evaluation/'summary.json').is_file():
             self.execute('verify_evaluation', helper_command(args, '_verify-evaluation'))
         else:
             self.gpu('evaluate', lambda n: eval_command(args, n), workers=world)
+            if args.recipe == 'b64-e40':
+                self.execute('verify_evaluation', helper_command(args, '_verify-evaluation'))
         self.update(status='complete', stage='complete', finished=now())
         self.note(f'Complete: {args.evaluation}/summary.json')
 
@@ -334,8 +360,9 @@ def verify_native(args):
     from score_function.navsim_chainflow.native import conditioner_identity
     from score_function.navsim_chainflow.evaluate import scoring_identity, validate_native_baseline
     from score_function.navsim_chainflow.assets import load_plan, publish_release_manifest
-    args.vlm_cache.mkdir(parents=True, exist_ok=True)
-    publish_release_manifest(args.vlm_cache/'release_manifest.json', load_plan())
+    if args.recipe != 'b64-e40':
+        args.vlm_cache.mkdir(parents=True, exist_ok=True)
+        publish_release_manifest(args.vlm_cache/'release_manifest.json', load_plan())
     identity = conditioner_identity(args.devkit_root, args.checkpoint, args.backbone, args.vlm_cache)
     if conditioner_identity(args.devkit_root, args.checkpoint, args.backbone, args.navtest_vlm_cache) != identity:
         raise ValueError('Train/val and navtest VLM roots declare different frozen conditioners')
@@ -469,7 +496,7 @@ def verify_evaluation(args):
             or request['baseline'] != str(args.baseline)
             or protocol['baseline'] != baseline_reference(args.baseline, baseline_protocol, hashes)
             or protocol['score_checkpoint_sha256'] != sha256(args.training/'final_ema.pt')
-            or protocol['score_epoch'] != 500 or protocol['score_weight_kind'] != 'ema'
+            or protocol['score_epoch'] != effective_config(args)['epochs'] or protocol['score_weight_kind'] != 'ema'
             or protocol['gamma'] != .1 or protocol['scoring_identity'] != scoring_identity(args.devkit_root)
             or request['native_identity'] != conditioner_identity(args.devkit_root, args.checkpoint, args.backbone, args.navtest_vlm_cache)):
         raise ValueError('Completed paired evaluation differs from this pipeline')
@@ -499,8 +526,10 @@ def preflight(args):
     # Include a full requested microbatch to exercise padding and memory, not one toy row.
     batch = train.collate_rows([training[i] for i in range(args.microbatch_size)])
     initial = {name: value.detach().clone() for name, value in model.named_parameters()}
+    # Use the peak LR for this isolated test when the real run starts close to zero.
+    preflight_step = cfg['warmup_epochs'] if args.recipe == 'b64-e40' else 0
     result = train.run_training_epoch([batch], model, optimizer, ema, cfg, device,
-                                      epoch=0, step=0, updates_per_epoch=1, accumulation=1)
+                                      epoch=0, step=preflight_step, updates_per_epoch=1, accumulation=1)
     if not any(not torch.equal(initial[name], value) for name, value in model.named_parameters()):
         raise RuntimeError('Preflight did not change any trainable parameter')
     scores = train.validate_models({'raw': model, 'ema': ema}, validation, cfg, device,
@@ -521,7 +550,7 @@ def snapshot(args):
         history = read_json(history_path)
         if history:
             row = history[-1]
-            print(f"Training: {row['epoch']}/500; train DSM={row['train_dsm']:.6f}; "
+            print(f"Training: {row['epoch']}/{effective_config(args)['epochs']}; train DSM={row['train_dsm']:.6f}; "
                   f"val RAW={row['val_dsm_raw']:.6f}; EMA={row['val_dsm_ema']:.6f}")
     summary_path = args.evaluation/'summary.json'
     if summary_path.is_file():
@@ -536,12 +565,16 @@ def snapshot(args):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['run', 'status', '_verify-native', '_verify-cache', '_verify-evaluation', '_preflight', '_prepare-assets'])
+    parser.add_argument('--recipe', choices=['v1', 'b64-e40'], default='v1',
+                        help='b64-e40 trains a fresh 40-epoch score on the verified ChainFlow cache')
+    parser.add_argument('--assets-from-plan', type=Path, metavar='PLAN',
+                        help='Reuse shared asset paths from an existing ChainFlow Score plan.json for b64-e40')
     parser.add_argument('--root', type=Path, default=Path('/home/data/wyk'))
     for key in paths_for(Path('/home/data/wyk')):
         parser.add_argument('--'+key.replace('_', '-'), type=Path)
-    parser.add_argument('--config', type=Path, default=REPO/'configs/navsim_chainflow_s10g.json')
-    parser.add_argument('--workers', default='4', choices=['1', '2', '4', '8', 'auto'])
-    parser.add_argument('--microbatch-size', type=int, default=16)
+    parser.add_argument('--config', type=Path)
+    parser.add_argument('--workers', choices=['1', '2', '4', '8', 'auto'])
+    parser.add_argument('--microbatch-size', type=int)
     parser.add_argument('--loader-workers', type=int, default=2)
     parser.add_argument('--gpu-policy', choices=['wait-idle', 'shared'], default='wait-idle')
     parser.add_argument('--gpu-pool', default='auto')
@@ -556,9 +589,34 @@ def parse_args(argv=None):
     parser.add_argument('--insecure-downloads', action='store_true',
                         help='Disable TLS verification only in the trainval download subprocess')
     args = parser.parse_args(argv)
+    short_run = args.recipe == 'b64-e40'
+    if short_run and (args.prepare_assets or args.command == '_prepare-assets'):
+        parser.error('b64-e40 reuses an existing ChainFlow cache; use its --cache path')
+    if args.config is None:
+        args.config = REPO/'configs'/('navsim_chainflow_s10g_b64_e40.json' if short_run else 'navsim_chainflow_s10g.json')
+    if args.workers is None:
+        args.workers = '8' if short_run else '4'
+    if args.microbatch_size is None:
+        args.microbatch_size = 8 if short_run else 16
     args.root = args.root.expanduser().resolve()
+    if args.assets_from_plan is not None:
+        if not short_run:
+            parser.error('--assets-from-plan is for the b64-e40 recipe')
+        try:
+            prior = read_json(args.assets_from_plan.expanduser())
+        except (OSError, ValueError) as exc:
+            parser.error(f'Cannot read --assets-from-plan: {exc}')
+        if (not isinstance(prior, dict) or prior.get('schema') != 'chainflow-score-pipeline-v1'
+                or not isinstance(prior.get('paths'), dict)):
+            parser.error('--assets-from-plan must be a ChainFlow Score pipeline plan.json')
+        for key in SHARED_PATHS:
+            if getattr(args, key) is None and key in prior['paths']:
+                value = prior['paths'][key]
+                if not isinstance(value, str) or not Path(value).is_absolute():
+                    parser.error(f'Expected an absolute path for {key} in --assets-from-plan')
+                setattr(args, key, Path(value))
     explicit_test_vlm = args.navtest_vlm_cache is not None
-    for key, value in paths_for(args.root).items():
+    for key, value in paths_for(args.root, args.recipe).items():
         chosen = (getattr(args, key) or value).expanduser()
         # Resolving a venv's python symlink would silently select the base interpreter.
         setattr(args, key, Path(os.path.abspath(chosen)) if key == 'python' else chosen.resolve())
